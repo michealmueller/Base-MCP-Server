@@ -1,0 +1,26 @@
+# MCP Server Dependencies
+
+# Core web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Data validation and serialization
+pydantic>=2.5.0
+
+# HTTP client for tool operations
+httpx>=0.25.0
+requests>=2.31.0
+
+# Development and testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# Logging and configuration
+python-dotenv>=1.0.0
+
+# Utilities
+click>=8.1.0 
