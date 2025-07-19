@@ -10,8 +10,14 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import MCPConfig
-from .server import create_server
+# Handle imports for both module and direct execution
+try:
+    from .config import MCPConfig
+    from .server import create_server
+except ImportError:
+    # When running directly from mcp_server directory
+    from config import MCPConfig
+    from server import create_server
 
 
 def setup_logging(config: MCPConfig):

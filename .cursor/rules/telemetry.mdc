@@ -1,0 +1,1438 @@
+---
+description: Telemetry Rules and Best Practices
+globs:
+alwaysApply: false
+---
+# Telemetry Rules and Best Practices
+
+This file contains rules for telemetry-related code generation. It guides the AI in generating code that adheres to best practices in telemetry collection, processing, and analysis.
+
+## Core Telemetry Principles
+
+### Telemetry Philosophy
+- Collect meaningful data that drives actionable insights
+- Balance telemetry value with collection overhead
+- Implement privacy-first telemetry practices
+- Design for both real-time and batch processing
+- Ensure telemetry data quality and reliability
+
+### Data Collection Strategy
+- Use sampling strategies to manage volume and costs
+- Implement semantic conventions for consistency
+- Design for multi-dimensional analysis
+- Maintain data lineage and provenance
+- Apply data retention policies based on value
+
+## Telemetry Data Models
+
+### Event Structure and Schema
+```python
+# Example: Structured telemetry event model
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+import uuid
+import json
+
+@dataclass
+class TelemetryEvent:
+    """Base telemetry event structure"""
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    event_type: str = ""
+    source: str = ""
+    version: str = "1.0"
+
+    # Core event data
+    name: str = ""
+    category: str = ""
+    properties: Dict[str, Any] = field(default_factory=dict)
+    measurements: Dict[str, float] = field(default_factory=dict)
+
+    # Context information
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+
+    # System context
+    environment: str = "production"
+    service_name: str = ""
+    service_version: str = ""
+    host_name: str = ""
+
+    # Custom dimensions
+    custom_dimensions: Dict[str, str] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert event to dictionary for serialization"""
+        return {
+            'event_id': self.event_id,
+            'timestamp': self.timestamp.isoformat(),
+            'event_type': self.event_type,
+            'source': self.source,
+            'version': self.version,
+            'name': self.name,
+            'category': self.category,
+            'properties': self.properties,
+            'measurements': self.measurements,
+            'context': {
+                'session_id': self.session_id,
+                'user_id': self.user_id,
+                'correlation_id': self.correlation_id,
+                'environment': self.environment,
+                'service_name': self.service_name,
+                'service_version': self.service_version,
+                'host_name': self.host_name
+            },
+            'custom_dimensions': self.custom_dimensions,
+            'tags': self.tags
+        }
+
+    def to_json(self) -> str:
+        """Convert event to JSON string"""
+        return json.dumps(self.to_dict(), default=str)
+
+@dataclass
+class UserInteractionEvent(TelemetryEvent):
+    """User interaction telemetry event"""
+    event_type: str = "user_interaction"
+    action: str = ""
+    target: str = ""
+    duration_ms: Optional[float] = None
+    success: bool = True
+
+    def __post_init__(self):
+        self.name = f"user.{self.action}"
+        self.category = "interaction"
+        if self.duration_ms:
+            self.measurements['duration_ms'] = self.duration_ms
+
+@dataclass
+class PerformanceEvent(TelemetryEvent):
+    """Performance telemetry event"""
+    event_type: str = "performance"
+    operation_name: str = ""
+    duration_ms: float = 0.0
+    cpu_usage: Optional[float] = None
+    memory_usage: Optional[float] = None
+
+    def __post_init__(self):
+        self.name = f"performance.{self.operation_name}"
+        self.category = "performance"
+        self.measurements.update({
+            'duration_ms': self.duration_ms,
+            'cpu_usage': self.cpu_usage or 0.0,
+            'memory_usage': self.memory_usage or 0.0
+        })
+
+@dataclass
+class ErrorEvent(TelemetryEvent):
+    """Error telemetry event"""
+    event_type: str = "error"
+    error_type: str = ""
+    error_message: str = ""
+    stack_trace: Optional[str] = None
+    severity: str = "error"
+
+    def __post_init__(self):
+        self.name = f"error.{self.error_type}"
+        self.category = "error"
+        self.properties.update({
+            'error_type': self.error_type,
+            'error_message': self.error_message,
+            'stack_trace': self.stack_trace,
+            'severity': self.severity
+        })
+```
+
+### Telemetry Collection Client
+```python
+# Example: Telemetry collection client with buffering and batching
+import threading
+import time
+import queue
+from typing import List, Callable, Optional
+import requests
+import logging
+
+class TelemetryCollector:
+    """Telemetry collector with buffering, batching, and retry logic"""
+
+    def __init__(self,
+                 endpoint: str,
+                 api_key: str,
+                 batch_size: int = 100,
+                 flush_interval: int = 30,
+                 max_buffer_size: int = 10000,
+                 retry_attempts: int = 3):
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.max_buffer_size = max_buffer_size
+        self.retry_attempts = retry_attempts
+
+        self.event_buffer = queue.Queue(maxsize=max_buffer_size)
+        self.flush_thread = None
+        self.running = False
+        self.logger = logging.getLogger(__name__)
+
+        # Sampling configuration
+        self.sampling_rate = 1.0  # 100% by default
+        self.sampling_rules = {}
+
+        # Privacy filters
+        self.privacy_filters = []
+
+        self.start()
+
+    def start(self):
+        """Start the telemetry collector"""
+        if not self.running:
+            self.running = True
+            self.flush_thread = threading.Thread(target=self._flush_worker)
+            self.flush_thread.daemon = True
+            self.flush_thread.start()
+
+    def stop(self):
+        """Stop the telemetry collector and flush remaining events"""
+        self.running = False
+        if self.flush_thread:
+            self.flush_thread.join(timeout=5)
+        self._flush_buffer()
+
+    def track_event(self, event: TelemetryEvent):
+        """Track a telemetry event"""
+        try:
+            # Apply sampling
+            if not self._should_sample(event):
+                return
+
+            # Apply privacy filters
+            filtered_event = self._apply_privacy_filters(event)
+
+            # Add to buffer
+            if not self.event_buffer.full():
+                self.event_buffer.put(filtered_event, timeout=1)
+            else:
+                self.logger.warning("Telemetry buffer full, dropping event")
+
+        except Exception as e:
+            self.logger.error(f"Error tracking event: {e}")
+
+    def track_user_interaction(self, action: str, target: str,
+                             user_id: Optional[str] = None,
+                             duration_ms: Optional[float] = None,
+                             success: bool = True,
+                             **kwargs):
+        """Track user interaction event"""
+        event = UserInteractionEvent(
+            action=action,
+            target=target,
+            user_id=user_id,
+            duration_ms=duration_ms,
+            success=success,
+            **kwargs
+        )
+        self.track_event(event)
+
+    def track_performance(self, operation_name: str, duration_ms: float,
+                         cpu_usage: Optional[float] = None,
+                         memory_usage: Optional[float] = None,
+                         **kwargs):
+        """Track performance event"""
+        event = PerformanceEvent(
+            operation_name=operation_name,
+            duration_ms=duration_ms,
+            cpu_usage=cpu_usage,
+            memory_usage=memory_usage,
+            **kwargs
+        )
+        self.track_event(event)
+
+    def track_error(self, error_type: str, error_message: str,
+                   stack_trace: Optional[str] = None,
+                   severity: str = "error",
+                   **kwargs):
+        """Track error event"""
+        event = ErrorEvent(
+            error_type=error_type,
+            error_message=error_message,
+            stack_trace=stack_trace,
+            severity=severity,
+            **kwargs
+        )
+        self.track_event(event)
+
+    def set_sampling_rate(self, rate: float):
+        """Set global sampling rate (0.0 to 1.0)"""
+        self.sampling_rate = max(0.0, min(1.0, rate))
+
+    def add_sampling_rule(self, event_type: str, rate: float):
+        """Add sampling rule for specific event type"""
+        self.sampling_rules[event_type] = max(0.0, min(1.0, rate))
+
+    def add_privacy_filter(self, filter_func: Callable[[TelemetryEvent], TelemetryEvent]):
+        """Add privacy filter function"""
+        self.privacy_filters.append(filter_func)
+
+    def _should_sample(self, event: TelemetryEvent) -> bool:
+        """Determine if event should be sampled"""
+        # Check specific rule for event type
+        rate = self.sampling_rules.get(event.event_type, self.sampling_rate)
+
+        # Simple random sampling
+        import random
+        return random.random() < rate
+
+    def _apply_privacy_filters(self, event: TelemetryEvent) -> TelemetryEvent:
+        """Apply privacy filters to event"""
+        filtered_event = event
+
+        for filter_func in self.privacy_filters:
+            try:
+                filtered_event = filter_func(filtered_event)
+            except Exception as e:
+                self.logger.error(f"Error applying privacy filter: {e}")
+
+        return filtered_event
+
+    def _flush_worker(self):
+        """Background worker to flush events periodically"""
+        while self.running:
+            time.sleep(self.flush_interval)
+            self._flush_buffer()
+
+    def _flush_buffer(self):
+        """Flush buffered events to telemetry endpoint"""
+        events_to_send = []
+
+        # Collect events from buffer
+        while not self.event_buffer.empty() and len(events_to_send) < self.batch_size:
+            try:
+                event = self.event_buffer.get_nowait()
+                events_to_send.append(event.to_dict())
+            except queue.Empty:
+                break
+
+        if events_to_send:
+            self._send_events(events_to_send)
+
+    def _send_events(self, events: List[Dict]):
+        """Send events to telemetry endpoint with retry logic"""
+        payload = {
+            'events': events,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}'
+        }
+
+        for attempt in range(self.retry_attempts):
+            try:
+                response = requests.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=30
+                )
+
+                if response.status_code == 200:
+                    self.logger.debug(f"Sent {len(events)} telemetry events")
+                    return
+                else:
+                    self.logger.warning(f"Telemetry endpoint returned {response.status_code}")
+
+            except Exception as e:
+                self.logger.error(f"Error sending telemetry (attempt {attempt + 1}): {e}")
+
+            # Exponential backoff
+            if attempt < self.retry_attempts - 1:
+                time.sleep(2 ** attempt)
+
+        self.logger.error(f"Failed to send {len(events)} telemetry events after {self.retry_attempts} attempts")
+
+# Usage example
+def create_privacy_filter() -> Callable[[TelemetryEvent], TelemetryEvent]:
+    """Create privacy filter to remove sensitive data"""
+    sensitive_keys = ['password', 'token', 'api_key', 'secret', 'credit_card']
+
+    def filter_sensitive_data(event: TelemetryEvent) -> TelemetryEvent:
+        # Filter properties
+        if event.properties:
+            event.properties = {
+                k: '[REDACTED]' if any(sensitive in k.lower() for sensitive in sensitive_keys) else v
+                for k, v in event.properties.items()
+            }
+
+        # Filter custom dimensions
+        if event.custom_dimensions:
+            event.custom_dimensions = {
+                k: '[REDACTED]' if any(sensitive in k.lower() for sensitive in sensitive_keys) else v
+                for k, v in event.custom_dimensions.items()
+            }
+
+        return event
+
+    return filter_sensitive_data
+
+# Initialize telemetry collector
+telemetry = TelemetryCollector(
+    endpoint="https://api.telemetry-service.com/v1/events",
+    api_key="your-api-key-here",
+    batch_size=50,
+    flush_interval=15
+)
+
+# Add privacy filter
+telemetry.add_privacy_filter(create_privacy_filter())
+
+# Set sampling rates
+telemetry.set_sampling_rate(0.1)  # 10% global sampling
+telemetry.add_sampling_rule("performance", 0.05)  # 5% for performance events
+telemetry.add_sampling_rule("error", 1.0)  # 100% for error events
+```
+
+## Custom Telemetry Decorators
+
+### Function and Class Instrumentation
+```python
+# Example: Telemetry decorators for automatic instrumentation
+import functools
+import time
+import inspect
+from typing import Any, Callable, Optional
+
+def telemetry_track(event_type: str = "function_call",
+                   track_performance: bool = True,
+                   track_errors: bool = True,
+                   sample_rate: float = 1.0,
+                   custom_properties: Optional[dict] = None):
+    """Decorator to automatically track function calls with telemetry"""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Check sampling
+            import random
+            if random.random() > sample_rate:
+                return func(*args, **kwargs)
+
+            start_time = time.time()
+            function_name = f"{func.__module__}.{func.__qualname__}"
+
+            # Prepare base properties
+            properties = {
+                'function_name': function_name,
+                'module': func.__module__,
+                'args_count': len(args),
+                'kwargs_count': len(kwargs)
+            }
+
+            if custom_properties:
+                properties.update(custom_properties)
+
+            try:
+                # Execute function
+                result = func(*args, **kwargs)
+
+                if track_performance:
+                    duration_ms = (time.time() - start_time) * 1000
+                    telemetry.track_performance(
+                        operation_name=function_name,
+                        duration_ms=duration_ms,
+                        properties=properties
+                    )
+                else:
+                    # Track as general event
+                    telemetry.track_event(TelemetryEvent(
+                        event_type=event_type,
+                        name=function_name,
+                        category="function_call",
+                        properties=properties
+                    ))
+
+                return result
+
+            except Exception as e:
+                if track_errors:
+                    telemetry.track_error(
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        stack_trace=traceback.format_exc(),
+                        properties={
+                            **properties,
+                            'function_failed': True
+                        }
+                    )
+                raise
+
+        return wrapper
+    return decorator
+
+def telemetry_track_class(track_methods: bool = True,
+                         track_init: bool = True,
+                         exclude_methods: Optional[List[str]] = None):
+    """Class decorator to automatically track method calls"""
+
+    def decorator(cls):
+        exclude_list = exclude_methods or []
+        exclude_list.extend(['__str__', '__repr__', '__dict__', '__weakref__'])
+
+        if track_init and hasattr(cls, '__init__'):
+            original_init = cls.__init__
+
+            @functools.wraps(original_init)
+            def tracked_init(self, *args, **kwargs):
+                telemetry.track_event(TelemetryEvent(
+                    event_type="class_instantiation",
+                    name=f"{cls.__module__}.{cls.__name__}.__init__",
+                    category="object_lifecycle",
+                    properties={
+                        'class_name': cls.__name__,
+                        'module': cls.__module__,
+                        'args_count': len(args),
+                        'kwargs_count': len(kwargs)
+                    }
+                ))
+                return original_init(self, *args, **kwargs)
+
+            cls.__init__ = tracked_init
+
+        if track_methods:
+            for attr_name in dir(cls):
+                if (attr_name.startswith('_') or
+                    attr_name in exclude_list):
+                    continue
+
+                attr = getattr(cls, attr_name)
+                if inspect.isfunction(attr) or inspect.ismethod(attr):
+                    # Apply telemetry decorator to method
+                    tracked_method = telemetry_track(
+                        event_type="method_call",
+                        track_performance=True
+                    )(attr)
+
+                    setattr(cls, attr_name, tracked_method)
+
+        return cls
+    return decorator
+
+# Usage examples
+@telemetry_track(track_performance=True, sample_rate=0.1)
+def process_user_data(user_id: str, data: dict):
+    """Process user data with automatic telemetry tracking"""
+    # Business logic here
+    time.sleep(0.1)  # Simulate processing
+    return {"processed": True, "user_id": user_id}
+
+@telemetry_track_class(track_methods=True, exclude_methods=['_helper_method'])
+class UserService:
+    """User service with automatic method tracking"""
+
+    def __init__(self, config: dict):
+        self.config = config
+
+    def get_user(self, user_id: str):
+        """Get user data"""
+        return {"id": user_id, "name": "John Doe"}
+
+    def update_user(self, user_id: str, data: dict):
+        """Update user data"""
+        return {"updated": True}
+
+    def _helper_method(self):
+        """This method won't be tracked due to exclusion"""
+        pass
+```
+
+## Real-time Telemetry Processing
+
+### Stream Processing for Telemetry
+```python
+# Example: Real-time telemetry stream processing
+import asyncio
+import aioredis
+from typing import AsyncGenerator, Dict, List, Callable
+import json
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+
+class TelemetryStreamProcessor:
+    """Real-time telemetry stream processor"""
+
+    def __init__(self, redis_url: str = "redis://localhost:6379"):
+        self.redis_url = redis_url
+        self.redis_client = None
+        self.processors = {}  # event_type -> processor function
+        self.aggregators = {}  # metric_name -> aggregator
+        self.running = False
+
+        # Metrics aggregation windows
+        self.metrics_windows = {
+            '1m': deque(maxlen=60),    # 1 minute window
+            '5m': deque(maxlen=300),   # 5 minute window
+            '1h': deque(maxlen=3600)   # 1 hour window
+        }
+
+    async def start(self):
+        """Start the stream processor"""
+        self.redis_client = await aioredis.from_url(self.redis_url)
+        self.running = True
+
+        # Start processing tasks
+        tasks = [
+            asyncio.create_task(self._process_events()),
+            asyncio.create_task(self._aggregate_metrics()),
+            asyncio.create_task(self._detect_anomalies())
+        ]
+
+        await asyncio.gather(*tasks)
+
+    async def stop(self):
+        """Stop the stream processor"""
+        self.running = False
+        if self.redis_client:
+            await self.redis_client.close()
+
+    def register_processor(self, event_type: str, processor: Callable):
+        """Register event processor for specific event type"""
+        self.processors[event_type] = processor
+
+    def register_aggregator(self, metric_name: str, aggregator: Callable):
+        """Register metric aggregator"""
+        self.aggregators[metric_name] = aggregator
+
+    async def _process_events(self):
+        """Process incoming telemetry events"""
+        while self.running:
+            try:
+                # Listen for events on Redis stream
+                streams = await self.redis_client.xread(
+                    {'telemetry_events': '$'},
+                    block=1000,
+                    count=100
+                )
+
+                for stream_name, events in streams:
+                    for event_id, fields in events:
+                        await self._handle_event(fields)
+
+            except Exception as e:
+                print(f"Error processing events: {e}")
+                await asyncio.sleep(1)
+
+    async def _handle_event(self, event_data: Dict):
+        """Handle individual telemetry event"""
+        try:
+            # Parse event
+            event_str = event_data.get(b'data', b'{}').decode('utf-8')
+            event = json.loads(event_str)
+
+            event_type = event.get('event_type')
+
+            # Route to specific processor
+            if event_type in self.processors:
+                await self.processors[event_type](mdc:event)
+
+            # Update metrics windows
+            self._update_metrics_windows(event)
+
+            # Trigger real-time alerts if needed
+            await self._check_real_time_alerts(event)
+
+        except Exception as e:
+            print(f"Error handling event: {e}")
+
+    def _update_metrics_windows(self, event: Dict):
+        """Update sliding window metrics"""
+        timestamp = datetime.fromisoformat(event.get('timestamp', datetime.utcnow().isoformat()))
+
+        # Add to all windows
+        for window_name, window in self.metrics_windows.items():
+            window.append({
+                'timestamp': timestamp,
+                'event': event
+            })
+
+    async def _aggregate_metrics(self):
+        """Aggregate metrics in real-time"""
+        while self.running:
+            try:
+                # Aggregate metrics for each window
+                for window_name, window_data in self.metrics_windows.items():
+                    if not window_data:
+                        continue
+
+                    # Calculate aggregations
+                    aggregated_metrics = await self._calculate_aggregations(
+                        list(window_data), window_name
+                    )
+
+                    # Store aggregated metrics
+                    await self._store_aggregated_metrics(window_name, aggregated_metrics)
+
+                await asyncio.sleep(10)  # Aggregate every 10 seconds
+
+            except Exception as e:
+                print(f"Error aggregating metrics: {e}")
+                await asyncio.sleep(5)
+
+    async def _calculate_aggregations(self, window_data: List[Dict], window_name: str) -> Dict:
+        """Calculate metric aggregations for time window"""
+        aggregations = {
+            'count': len(window_data),
+            'error_rate': 0.0,
+            'avg_duration': 0.0,
+            'p95_duration': 0.0,
+            'unique_users': set(),
+            'top_errors': defaultdict(int)
+        }
+
+        durations = []
+        error_count = 0
+
+        for entry in window_data:
+            event = entry['event']
+
+            # Count errors
+            if event.get('event_type') == 'error':
+                error_count += 1
+                error_type = event.get('properties', {}).get('error_type', 'unknown')
+                aggregations['top_errors'][error_type] += 1
+
+            # Collect durations
+            if 'measurements' in event and 'duration_ms' in event['measurements']:
+                durations.append(event['measurements']['duration_ms'])
+
+            # Track unique users
+            user_id = event.get('user_id')
+            if user_id:
+                aggregations['unique_users'].add(user_id)
+
+        # Calculate derived metrics
+        if window_data:
+            aggregations['error_rate'] = (error_count / len(window_data)) * 100
+
+        if durations:
+            aggregations['avg_duration'] = sum(durations) / len(durations)
+            aggregations['p95_duration'] = sorted(durations)[int(len(durations) * 0.95)]
+
+        aggregations['unique_users'] = len(aggregations['unique_users'])
+        aggregations['top_errors'] = dict(aggregations['top_errors'])
+
+        return aggregations
+
+    async def _store_aggregated_metrics(self, window_name: str, metrics: Dict):
+        """Store aggregated metrics"""
+        key = f"aggregated_metrics:{window_name}"
+
+        # Store in Redis with expiration
+        await self.redis_client.setex(
+            key,
+            3600,  # 1 hour expiration
+            json.dumps(metrics, default=str)
+        )
+
+        # Also publish for real-time subscribers
+        await self.redis_client.publish(
+            f"metrics:{window_name}",
+            json.dumps(metrics, default=str)
+        )
+
+    async def _detect_anomalies(self):
+        """Detect anomalies in real-time metrics"""
+        while self.running:
+            try:
+                # Get current metrics
+                current_metrics_str = await self.redis_client.get("aggregated_metrics:1m")
+
+                if current_metrics_str:
+                    current_metrics = json.loads(current_metrics_str)
+
+                    # Simple anomaly detection rules
+                    anomalies = []
+
+                    # High error rate
+                    if current_metrics.get('error_rate', 0) > 5.0:
+                        anomalies.append({
+                            'type': 'high_error_rate',
+                            'value': current_metrics['error_rate'],
+                            'threshold': 5.0,
+                            'severity': 'warning'
+                        })
+
+                    # High response time
+                    if current_metrics.get('p95_duration', 0) > 2000:  # 2 seconds
+                        anomalies.append({
+                            'type': 'high_response_time',
+                            'value': current_metrics['p95_duration'],
+                            'threshold': 2000,
+                            'severity': 'warning'
+                        })
+
+                    # Process anomalies
+                    for anomaly in anomalies:
+                        await self._handle_anomaly(anomaly)
+
+                await asyncio.sleep(30)  # Check every 30 seconds
+
+            except Exception as e:
+                print(f"Error detecting anomalies: {e}")
+                await asyncio.sleep(10)
+
+    async def _handle_anomaly(self, anomaly: Dict):
+        """Handle detected anomaly"""
+        # Publish anomaly alert
+        await self.redis_client.publish(
+            "anomaly_alerts",
+            json.dumps({
+                'timestamp': datetime.utcnow().isoformat(),
+                'anomaly': anomaly
+            })
+        )
+
+        print(f"Anomaly detected: {anomaly}")
+
+    async def _check_real_time_alerts(self, event: Dict):
+        """Check for real-time alert conditions"""
+        # Example: Alert on critical errors
+        if (event.get('event_type') == 'error' and
+            event.get('properties', {}).get('severity') == 'critical'):
+
+            await self.redis_client.publish(
+                "critical_alerts",
+                json.dumps({
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'event': event,
+                    'alert_type': 'critical_error'
+                })
+            )
+
+# Example processors
+async def process_user_interaction(event: Dict):
+    """Process user interaction events"""
+    action = event.get('properties', {}).get('action')
+    duration = event.get('measurements', {}).get('duration_ms', 0)
+
+    print(f"User action: {action}, Duration: {duration}ms")
+
+async def process_performance_event(event: Dict):
+    """Process performance events"""
+    operation = event.get('properties', {}).get('operation_name')
+    duration = event.get('measurements', {}).get('duration_ms', 0)
+
+    if duration > 1000:  # Log slow operations
+        print(f"Slow operation detected: {operation} took {duration}ms")
+
+# Usage
+async def main():
+    processor = TelemetryStreamProcessor()
+
+    # Register processors
+    processor.register_processor('user_interaction', process_user_interaction)
+    processor.register_processor('performance', process_performance_event)
+
+    # Start processing
+    await processor.start()
+
+# Run with: asyncio.run(main())
+```
+
+## Telemetry Analytics and Insights
+
+### Data Analysis and Reporting
+```python
+# Example: Telemetry analytics engine
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+class TelemetryAnalytics:
+    """Analytics engine for telemetry data"""
+
+    def __init__(self, data_source: str):
+        self.data_source = data_source
+        self.data_cache = {}
+
+    def load_data(self, start_date: datetime, end_date: datetime,
+                 event_types: Optional[List[str]] = None) -> pd.DataFrame:
+        """Load telemetry data for analysis"""
+        # In real implementation, this would connect to your data warehouse
+        # For example: BigQuery, Snowflake, ClickHouse, etc.
+
+        query = f"""
+        SELECT *
+        FROM telemetry_events
+        WHERE timestamp BETWEEN '{start_date}' AND '{end_date}'
+        """
+
+        if event_types:
+            event_types_str = "', '".join(event_types)
+            query += f" AND event_type IN ('{event_types_str}')"
+
+        # Load data (pseudo-code)
+        df = pd.read_sql(query, self.data_source)
+        return df
+
+    def analyze_user_behavior(self, df: pd.DataFrame) -> Dict:
+        """Analyze user behavior patterns"""
+        user_interactions = df[df['event_type'] == 'user_interaction'].copy()
+
+        if user_interactions.empty:
+            return {'error': 'No user interaction data found'}
+
+        # User engagement metrics
+        user_metrics = user_interactions.groupby('user_id').agg({
+            'event_id': 'count',  # Session count
+            'timestamp': ['min', 'max'],  # First and last interaction
+            'measurements.duration_ms': ['mean', 'sum']  # Average and total duration
+        }).round(2)
+
+        user_metrics.columns = ['session_count', 'first_seen', 'last_seen',
+                               'avg_duration_ms', 'total_duration_ms']
+
+        # Calculate session duration
+        user_metrics['total_session_duration'] = (
+            user_metrics['last_seen'] - user_metrics['first_seen']
+        ).dt.total_seconds()
+
+        # User segmentation using clustering
+        features = ['session_count', 'avg_duration_ms', 'total_session_duration']
+        feature_data = user_metrics[features].fillna(0)
+
+        scaler = StandardScaler()
+        scaled_features = scaler.fit_transform(feature_data)
+
+        kmeans = KMeans(n_clusters=3, random_state=42)
+        user_metrics['user_segment'] = kmeans.fit_predict(scaled_features)
+
+        # Analyze segments
+        segment_analysis = user_metrics.groupby('user_segment').agg({
+            'session_count': ['mean', 'median'],
+            'avg_duration_ms': ['mean', 'median'],
+            'total_session_duration': ['mean', 'median']
+        }).round(2)
+
+        return {
+            'total_users': len(user_metrics),
+            'user_segments': segment_analysis.to_dict(),
+            'top_users': user_metrics.nlargest(10, 'session_count').to_dict(),
+            'engagement_summary': {
+                'avg_sessions_per_user': user_metrics['session_count'].mean(),
+                'avg_duration_per_session': user_metrics['avg_duration_ms'].mean(),
+                'median_session_count': user_metrics['session_count'].median()
+            }
+        }
+
+    def analyze_performance_trends(self, df: pd.DataFrame) -> Dict:
+        """Analyze performance trends over time"""
+        performance_data = df[df['event_type'] == 'performance'].copy()
+
+        if performance_data.empty:
+            return {'error': 'No performance data found'}
+
+        # Convert timestamp to datetime
+        performance_data['timestamp'] = pd.to_datetime(performance_data['timestamp'])
+        performance_data.set_index('timestamp', inplace=True)
+
+        # Resample to hourly aggregations
+        hourly_metrics = performance_data.resample('1H').agg({
+            'measurements.duration_ms': ['mean', 'median', 'std', 'count'],
+            'measurements.cpu_usage': ['mean', 'max'],
+            'measurements.memory_usage': ['mean', 'max']
+        }).round(2)
+
+        # Flatten column names
+        hourly_metrics.columns = ['_'.join(col).strip() for col in hourly_metrics.columns]
+
+        # Calculate trends
+        duration_trend = self._calculate_trend(hourly_metrics['measurements.duration_ms_mean'])
+        cpu_trend = self._calculate_trend(hourly_metrics['measurements.cpu_usage_mean'])
+        memory_trend = self._calculate_trend(hourly_metrics['measurements.memory_usage_mean'])
+
+        # Performance percentiles
+        percentiles = performance_data['measurements.duration_ms'].quantile([0.5, 0.75, 0.95, 0.99])
+
+        return {
+            'hourly_metrics': hourly_metrics.to_dict(),
+            'trends': {
+                'duration_ms': duration_trend,
+                'cpu_usage': cpu_trend,
+                'memory_usage': memory_trend
+            },
+            'percentiles': percentiles.to_dict(),
+            'total_operations': len(performance_data),
+            'time_range': {
+                'start': performance_data.index.min().isoformat(),
+                'end': performance_data.index.max().isoformat()
+            }
+        }
+
+    def analyze_error_patterns(self, df: pd.DataFrame) -> Dict:
+        """Analyze error patterns and trends"""
+        error_data = df[df['event_type'] == 'error'].copy()
+
+        if error_data.empty:
+            return {'error': 'No error data found'}
+
+        # Error frequency by type
+        error_types = error_data['properties.error_type'].value_counts()
+
+        # Error severity distribution
+        severity_dist = error_data['properties.severity'].value_counts()
+
+        # Errors over time
+        error_data['timestamp'] = pd.to_datetime(error_data['timestamp'])
+        error_data.set_index('timestamp', inplace=True)
+
+        hourly_errors = error_data.resample('1H').size()
+
+        # Error correlation with other metrics
+        # Join with performance data to see if errors correlate with performance issues
+
+        return {
+            'total_errors': len(error_data),
+            'error_types': error_types.to_dict(),
+            'severity_distribution': severity_dist.to_dict(),
+            'hourly_error_count': hourly_errors.to_dict(),
+            'error_rate_trend': self._calculate_trend(hourly_errors),
+            'top_error_messages': error_data['properties.error_message'].value_counts().head(10).to_dict()
+        }
+
+    def create_insights_report(self, start_date: datetime, end_date: datetime) -> Dict:
+        """Generate comprehensive insights report"""
+        # Load all relevant data
+        df = self.load_data(start_date, end_date)
+
+        if df.empty:
+            return {'error': 'No data found for specified date range'}
+
+        # Run all analyses
+        user_analysis = self.analyze_user_behavior(df)
+        performance_analysis = self.analyze_performance_trends(df)
+        error_analysis = self.analyze_error_patterns(df)
+
+        # Generate key insights
+        insights = self._generate_key_insights(df, user_analysis, performance_analysis, error_analysis)
+
+        return {
+            'report_period': {
+                'start': start_date.isoformat(),
+                'end': end_date.isoformat()
+            },
+            'summary': {
+                'total_events': len(df),
+                'unique_users': df['user_id'].nunique(),
+                'event_types': df['event_type'].value_counts().to_dict()
+            },
+            'user_behavior': user_analysis,
+            'performance': performance_analysis,
+            'errors': error_analysis,
+            'key_insights': insights
+        }
+
+    def _calculate_trend(self, series: pd.Series) -> str:
+        """Calculate trend direction for time series"""
+        if len(series) < 2:
+            return 'insufficient_data'
+
+        # Simple trend calculation using linear regression slope
+        x = np.arange(len(series))
+        y = series.fillna(series.mean()).values
+
+        if len(y) == 0:
+            return 'no_data'
+
+        slope = np.polyfit(x, y, 1)[0]
+
+        if slope > 0.1:
+            return 'increasing'
+        elif slope < -0.1:
+            return 'decreasing'
+        else:
+            return 'stable'
+
+    def _generate_key_insights(self, df: pd.DataFrame, user_analysis: Dict,
+                              performance_analysis: Dict, error_analysis: Dict) -> List[str]:
+        """Generate key insights from analysis results"""
+        insights = []
+
+        # User insights
+        if 'total_users' in user_analysis and user_analysis['total_users'] > 0:
+            avg_sessions = user_analysis.get('engagement_summary', {}).get('avg_sessions_per_user', 0)
+            if avg_sessions > 5:
+                insights.append(f"High user engagement: Average {avg_sessions:.1f} sessions per user")
+            elif avg_sessions < 1.5:
+                insights.append("Low user engagement detected - consider improving user experience")
+
+        # Performance insights
+        if 'trends' in performance_analysis:
+            duration_trend = performance_analysis['trends'].get('duration_ms', 'unknown')
+            if duration_trend == 'increasing':
+                insights.append("Performance degradation detected - response times are increasing")
+            elif duration_trend == 'decreasing':
+                insights.append("Performance improvement observed - response times are decreasing")
+
+        # Error insights
+        if 'total_errors' in error_analysis and error_analysis['total_errors'] > 0:
+            error_rate = (error_analysis['total_errors'] / len(df)) * 100
+            if error_rate > 5:
+                insights.append(f"High error rate detected: {error_rate:.1f}% of all events are errors")
+
+            error_trend = error_analysis.get('error_rate_trend', 'unknown')
+            if error_trend == 'increasing':
+                insights.append("Error rate is increasing - immediate attention needed")
+
+        return insights
+
+# Usage example
+def generate_weekly_report():
+    """Generate weekly telemetry insights report"""
+    analytics = TelemetryAnalytics("your_data_warehouse_connection")
+
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=7)
+
+    report = analytics.create_insights_report(start_date, end_date)
+
+    # Save or send report
+    with open(f"telemetry_report_{end_date.strftime('%Y%m%d')}.json", 'w') as f:
+        import json
+        json.dump(report, f, indent=2, default=str)
+
+    return report
+```
+
+## Privacy and Compliance
+
+### Privacy-First Telemetry
+```python
+# Example: Privacy-aware telemetry implementation
+import hashlib
+import hmac
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+
+class DataSensitivity(Enum):
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+class PrivacyLevel(Enum):
+    NONE = "none"
+    PSEUDONYMIZATION = "pseudonymization"
+    ANONYMIZATION = "anonymization"
+    ENCRYPTION = "encryption"
+
+@dataclass
+class PrivacyPolicy:
+    """Privacy policy for telemetry data"""
+    field_name: str
+    sensitivity: DataSensitivity
+    privacy_level: PrivacyLevel
+    retention_days: int = 90
+    allowed_purposes: List[str] = field(default_factory=list)
+    geographic_restrictions: List[str] = field(default_factory=list)
+
+class PrivacyCompliantTelemetry:
+    """Privacy-compliant telemetry collector"""
+
+    def __init__(self, encryption_key: str, hmac_key: str):
+        self.encryption_key = encryption_key
+        self.hmac_key = hmac_key
+        self.privacy_policies: Dict[str, PrivacyPolicy] = {}
+        self.consent_status: Dict[str, Dict[str, bool]] = {}
+
+        # Default privacy policies
+        self._setup_default_policies()
+
+    def _setup_default_policies(self):
+        """Setup default privacy policies for common fields"""
+        policies = [
+            PrivacyPolicy(
+                field_name="user_id",
+                sensitivity=DataSensitivity.CONFIDENTIAL,
+                privacy_level=PrivacyLevel.PSEUDONYMIZATION,
+                retention_days=365,
+                allowed_purposes=["analytics", "performance_monitoring"]
+            ),
+            PrivacyPolicy(
+                field_name="email",
+                sensitivity=DataSensitivity.RESTRICTED,
+                privacy_level=PrivacyLevel.ENCRYPTION,
+                retention_days=90,
+                allowed_purposes=["user_support"]
+            ),
+            PrivacyPolicy(
+                field_name="ip_address",
+                sensitivity=DataSensitivity.CONFIDENTIAL,
+                privacy_level=PrivacyLevel.ANONYMIZATION,
+                retention_days=30,
+                allowed_purposes=["security", "analytics"]
+            ),
+            PrivacyPolicy(
+                field_name="session_id",
+                sensitivity=DataSensitivity.INTERNAL,
+                privacy_level=PrivacyLevel.PSEUDONYMIZATION,
+                retention_days=180,
+                allowed_purposes=["analytics", "performance_monitoring", "debugging"]
+            )
+        ]
+
+        for policy in policies:
+            self.privacy_policies[policy.field_name] = policy
+
+    def add_privacy_policy(self, policy: PrivacyPolicy):
+        """Add custom privacy policy"""
+        self.privacy_policies[policy.field_name] = policy
+
+    def record_consent(self, user_id: str, purpose: str, granted: bool):
+        """Record user consent for specific purpose"""
+        if user_id not in self.consent_status:
+            self.consent_status[user_id] = {}
+        self.consent_status[user_id][purpose] = granted
+
+    def check_consent(self, user_id: str, purpose: str) -> bool:
+        """Check if user has consented to specific purpose"""
+        return self.consent_status.get(user_id, {}).get(purpose, False)
+
+    def apply_privacy_protection(self, event: TelemetryEvent,
+                                purpose: str) -> TelemetryEvent:
+        """Apply privacy protection to telemetry event"""
+        protected_event = event
+
+        # Check consent for user
+        if event.user_id and not self.check_consent(event.user_id, purpose):
+            # Remove or anonymize user-related data
+            protected_event.user_id = None
+            protected_event.session_id = None
+
+        # Apply field-level privacy protection
+        protected_event = self._apply_field_protection(protected_event, purpose)
+
+        return protected_event
+
+    def _apply_field_protection(self, event: TelemetryEvent,
+                               purpose: str) -> TelemetryEvent:
+        """Apply field-level privacy protection"""
+        # Process event properties
+        if event.properties:
+            event.properties = self._protect_dict_fields(
+                event.properties, purpose
+            )
+
+        # Process custom dimensions
+        if event.custom_dimensions:
+            event.custom_dimensions = self._protect_dict_fields(
+                event.custom_dimensions, purpose
+            )
+
+        # Protect direct fields
+        for field_name in ['user_id', 'session_id']:
+            if hasattr(event, field_name):
+                field_value = getattr(event, field_name)
+                if field_value and field_name in self.privacy_policies:
+                    policy = self.privacy_policies[field_name]
+
+                    if purpose in policy.allowed_purposes:
+                        protected_value = self._apply_privacy_level(
+                            field_value, policy.privacy_level
+                        )
+                        setattr(event, field_name, protected_value)
+                    else:
+                        setattr(event, field_name, None)
+
+        return event
+
+    def _protect_dict_fields(self, data: Dict[str, Any],
+                            purpose: str) -> Dict[str, Any]:
+        """Apply privacy protection to dictionary fields"""
+        protected_data = {}
+
+        for key, value in data.items():
+            if key in self.privacy_policies:
+                policy = self.privacy_policies[key]
+
+                if purpose in policy.allowed_purposes:
+                    protected_data[key] = self._apply_privacy_level(
+                        value, policy.privacy_level
+                    )
+                # If purpose not allowed, field is omitted
+            else:
+                # No policy defined, include as-is but check for sensitive patterns
+                if self._is_potentially_sensitive(key, value):
+                    protected_data[key] = self._apply_privacy_level(
+                        value, PrivacyLevel.PSEUDONYMIZATION
+                    )
+                else:
+                    protected_data[key] = value
+
+        return protected_data
+
+    def _apply_privacy_level(self, value: Any, privacy_level: PrivacyLevel) -> Any:
+        """Apply specific privacy protection level"""
+        if privacy_level == PrivacyLevel.NONE:
+            return value
+
+        str_value = str(value)
+
+        if privacy_level == PrivacyLevel.PSEUDONYMIZATION:
+            return self._pseudonymize(str_value)
+
+        elif privacy_level == PrivacyLevel.ANONYMIZATION:
+            return self._anonymize(str_value)
+
+        elif privacy_level == PrivacyLevel.ENCRYPTION:
+            return self._encrypt(str_value)
+
+        return value
+
+    def _pseudonymize(self, value: str) -> str:
+        """Create pseudonym using HMAC"""
+        return hmac.new(
+            self.hmac_key.encode(),
+            value.encode(),
+            hashlib.sha256
+        ).hexdigest()[:16]  # Use first 16 characters
+
+    def _anonymize(self, value: str) -> str:
+        """Anonymize value by removing identifying information"""
+        # For IP addresses, remove last octet
+        import re
+        if re.match(r'\d+\.\d+\.\d+\.\d+', value):
+            parts = value.split('.')
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0"
+
+        # For other values, use hash
+        return hashlib.sha256(value.encode()).hexdigest()[:12]
+
+    def _encrypt(self, value: str) -> str:
+        """Encrypt sensitive value"""
+        from cryptography.fernet import Fernet
+
+        # In production, use proper key management
+        cipher = Fernet(self.encryption_key.encode())
+        encrypted = cipher.encrypt(value.encode())
+        return encrypted.decode()
+
+    def _is_potentially_sensitive(self, key: str, value: Any) -> bool:
+        """Check if field might contain sensitive data"""
+        sensitive_patterns = [
+            'email', 'phone', 'address', 'name', 'ssn', 'credit',
+            'password', 'token', 'key', 'secret', 'personal'
+        ]
+
+        key_lower = key.lower()
+        return any(pattern in key_lower for pattern in sensitive_patterns)
+
+    def create_data_retention_policy(self) -> Dict[str, int]:
+        """Create data retention schedule based on privacy policies"""
+        retention_schedule = {}
+
+        for field_name, policy in self.privacy_policies.items():
+            retention_schedule[field_name] = policy.retention_days
+
+        return retention_schedule
+
+    def generate_privacy_report(self) -> Dict:
+        """Generate privacy compliance report"""
+        total_policies = len(self.privacy_policies)
+        sensitivity_breakdown = {}
+        privacy_level_breakdown = {}
+
+        for policy in self.privacy_policies.values():
+            # Count by sensitivity
+            sens_key = policy.sensitivity.value
+            sensitivity_breakdown[sens_key] = sensitivity_breakdown.get(sens_key, 0) + 1
+
+            # Count by privacy level
+            priv_key = policy.privacy_level.value
+            privacy_level_breakdown[priv_key] = privacy_level_breakdown.get(priv_key, 0) + 1
+
+        return {
+            'total_policies': total_policies,
+            'sensitivity_distribution': sensitivity_breakdown,
+            'privacy_level_distribution': privacy_level_breakdown,
+            'retention_policies': self.create_data_retention_policy(),
+            'consent_coverage': {
+                'total_users': len(self.consent_status),
+                'avg_consents_per_user': np.mean([
+                    len(consents) for consents in self.consent_status.values()
+                ]) if self.consent_status else 0
+            }
+        }
+
+# Usage example
+def setup_privacy_compliant_telemetry():
+    """Setup privacy-compliant telemetry system"""
+    # Initialize with encryption keys
+    privacy_telemetry = PrivacyCompliantTelemetry(
+        encryption_key="your-encryption-key-here",
+        hmac_key="your-hmac-key-here"
+    )
+
+    # Add custom privacy policy
+    privacy_telemetry.add_privacy_policy(
+        PrivacyPolicy(
+            field_name="transaction_id",
+            sensitivity=DataSensitivity.CONFIDENTIAL,
+            privacy_level=PrivacyLevel.PSEUDONYMIZATION,
+            retention_days=2555,  # 7 years for financial data
+            allowed_purposes=["fraud_detection", "compliance"]
+        )
+    )
+
+    # Record user consent
+    privacy_telemetry.record_consent("user123", "analytics", True)
+    privacy_telemetry.record_consent("user123", "marketing", False)
+
+    return privacy_telemetry
+```
+
+## Best Practices and Anti-Patterns
+
+### Best Practices
+✅ Implement structured event schemas with versioning
+✅ Use sampling to manage telemetry volume and costs
+✅ Apply privacy-by-design principles from the start
+✅ Implement proper data retention and deletion policies
+✅ Use correlation IDs to trace events across systems
+✅ Monitor telemetry system health itself
+✅ Implement proper error handling and fallback mechanisms
+✅ Use asynchronous processing to minimize performance impact
+
+### Anti-Patterns to Avoid
+❌ Collecting data without clear business purpose
+❌ Ignoring privacy regulations and user consent
+❌ Over-instrumenting without considering performance impact
+❌ Not implementing proper data quality validation
+❌ Storing telemetry data indefinitely without retention policies
+❌ Not testing telemetry collection and processing pipelines
+❌ Mixing telemetry with application logging
+❌ Not implementing proper access controls for telemetry data
+
+## Tool Integration and Ecosystem
+
+### Popular Telemetry Platforms
+- **Application Insights**: Azure Application Insights, AWS X-Ray
+- **APM Solutions**: New Relic, DataDog, Dynatrace
+- **Analytics Platforms**: Google Analytics, Adobe Analytics, Mixpanel
+- **Open Source**: OpenTelemetry, Jaeger, Zipkin
+- **Data Warehouses**: BigQuery, Snowflake, ClickHouse
+
+### Integration Patterns
+- **Event Streaming**: Apache Kafka, Azure Event Hubs, AWS Kinesis
+- **Data Processing**: Apache Spark, Apache Flink, Azure Stream Analytics
+- **Storage**: Time-series databases (InfluxDB, TimescaleDB), Document stores (MongoDB)
+- **Visualization**: Grafana, Tableau, Power BI, Jupyter Notebooks

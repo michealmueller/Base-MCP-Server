@@ -1,0 +1,924 @@
+---
+description: Observability Rules and Best Practices
+globs:
+alwaysApply: false
+---
+# Observability Rules and Best Practices
+
+This file contains rules for observability-related code generation. It guides the AI in generating code that adheres to best practices in system observability, monitoring, and distributed system visibility.
+
+## Core Observability Principles
+
+### The Three Pillars of Observability
+- **Metrics**: Quantitative measurements of system behavior over time
+- **Logs**: Discrete events with structured or unstructured data
+- **Traces**: Request flows through distributed systems showing relationships
+
+### Observability vs. Monitoring
+- Observability enables understanding system behavior from external outputs
+- Focus on cardinality and dimensionality for better insights
+- Implement correlation between metrics, logs, and traces
+- Design for unknown unknowns, not just known failure modes
+
+## Metrics Implementation
+
+### Metric Types and Patterns
+```python
+# Example: Comprehensive metrics implementation
+from prometheus_client import Counter, Histogram, Gauge, Summary
+import time
+from functools import wraps
+
+# Define standard metrics
+REQUEST_COUNT = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status_code']
+)
+
+REQUEST_DURATION = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration in seconds',
+    ['method', 'endpoint']
+)
+
+ACTIVE_CONNECTIONS = Gauge(
+    'active_connections',
+    'Number of active connections'
+)
+
+RESPONSE_SIZE = Summary(
+    'http_response_size_bytes',
+    'HTTP response size in bytes'
+)
+
+def observe_requests(func):
+    """Decorator to automatically observe HTTP request metrics"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+
+        try:
+            response = func(*args, **kwargs)
+            status_code = getattr(response, 'status_code', 200)
+
+            # Record metrics
+            REQUEST_COUNT.labels(
+                method=kwargs.get('method', 'GET'),
+                endpoint=kwargs.get('endpoint', '/'),
+                status_code=status_code
+            ).inc()
+
+            REQUEST_DURATION.labels(
+                method=kwargs.get('method', 'GET'),
+                endpoint=kwargs.get('endpoint', '/')
+            ).observe(time.time() - start_time)
+
+            return response
+
+        except Exception as e:
+            REQUEST_COUNT.labels(
+                method=kwargs.get('method', 'GET'),
+                endpoint=kwargs.get('endpoint', '/'),
+                status_code=500
+            ).inc()
+            raise
+
+    return wrapper
+```
+
+### Business Metrics
+```python
+# Example: Business-focused observability metrics
+from dataclasses import dataclass
+from typing import Dict, List
+import json
+
+@dataclass
+class BusinessMetric:
+    name: str
+    value: float
+    unit: str
+    dimensions: Dict[str, str]
+    timestamp: float
+
+class BusinessMetricsCollector:
+    def __init__(self):
+        self.metrics_buffer = []
+        self.sli_targets = {}  # Service Level Indicators
+
+    def record_user_action(self, action: str, user_id: str,
+                          duration_ms: float, success: bool):
+        """Record user interaction metrics"""
+        self.metrics_buffer.append(BusinessMetric(
+            name='user_action_duration',
+            value=duration_ms,
+            unit='milliseconds',
+            dimensions={
+                'action': action,
+                'user_segment': self._get_user_segment(user_id),
+                'success': str(success)
+            },
+            timestamp=time.time()
+        ))
+
+        # Track conversion funnel
+        if action in ['signup', 'purchase', 'subscription']:
+            self._track_conversion_event(action, user_id, success)
+
+    def calculate_sli(self, metric_name: str, time_window: int = 3600) -> Dict:
+        """Calculate Service Level Indicator"""
+        relevant_metrics = [
+            m for m in self.metrics_buffer
+            if m.name == metric_name and
+            time.time() - m.timestamp < time_window
+        ]
+
+        if not relevant_metrics:
+            return {'sli': 0, 'target': self.sli_targets.get(metric_name, 99.9)}
+
+        success_metrics = [
+            m for m in relevant_metrics
+            if m.dimensions.get('success') == 'True'
+        ]
+
+        sli = (len(success_metrics) / len(relevant_metrics)) * 100
+
+        return {
+            'sli': sli,
+            'target': self.sli_targets.get(metric_name, 99.9),
+            'total_requests': len(relevant_metrics),
+            'successful_requests': len(success_metrics)
+        }
+```
+
+## Structured Logging
+
+### Log Structure and Standards
+```python
+# Example: Structured logging implementation
+import json
+import logging
+from datetime import datetime
+from typing import Any, Dict, Optional
+import uuid
+import traceback
+
+class StructuredLogger:
+    def __init__(self, service_name: str, version: str):
+        self.service_name = service_name
+        self.version = version
+        self.logger = logging.getLogger(service_name)
+
+        # Configure JSON formatter
+        handler = logging.StreamHandler()
+        handler.setFormatter(self._get_json_formatter())
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
+
+    def info(self, message: str, **kwargs):
+        """Log info level message with structured data"""
+        self._log('INFO', message, **kwargs)
+
+    def error(self, message: str, error: Optional[Exception] = None, **kwargs):
+        """Log error with exception details"""
+        error_data = {}
+        if error:
+            error_data = {
+                'error_type': type(error).__name__,
+                'error_message': str(error),
+                'stack_trace': traceback.format_exc()
+            }
+        self._log('ERROR', message, **error_data, **kwargs)
+
+    def _log(self, level: str, message: str, **kwargs):
+        """Internal logging method with standard fields"""
+        log_entry = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'level': level,
+            'service': self.service_name,
+            'version': self.version,
+            'message': message,
+            'trace_id': kwargs.pop('trace_id', self._get_trace_id()),
+            'span_id': kwargs.pop('span_id', self._get_span_id()),
+            **kwargs
+        }
+
+        self.logger.info(json.dumps(log_entry))
+
+    def _get_json_formatter(self):
+        """Return JSON formatter for logs"""
+        return logging.Formatter(
+            '%(message)s'  # Message is already JSON formatted
+        )
+
+    def _get_trace_id(self) -> str:
+        """Get current trace ID from context or generate new one"""
+        # In real implementation, get from tracing context
+        return str(uuid.uuid4())
+
+    def _get_span_id(self) -> str:
+        """Get current span ID from context"""
+        # In real implementation, get from tracing context
+        return str(uuid.uuid4())[:8]
+
+# Usage example
+logger = StructuredLogger('user-service', '1.2.3')
+
+def process_user_request(user_id: str, action: str):
+    logger.info(
+        'Processing user request',
+        user_id=user_id,
+        action=action,
+        request_id=str(uuid.uuid4())
+    )
+
+    try:
+        # Business logic here
+        result = perform_action(user_id, action)
+
+        logger.info(
+            'User request completed successfully',
+            user_id=user_id,
+            action=action,
+            result_size=len(str(result))
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(
+            'User request failed',
+            error=e,
+            user_id=user_id,
+            action=action
+        )
+        raise
+```
+
+### Log Correlation and Context
+```python
+# Example: Log correlation across services
+import contextvars
+from typing import Optional
+
+# Context variables for request correlation
+trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('trace_id')
+span_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('span_id')
+user_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('user_id')
+
+class CorrelationContext:
+    @staticmethod
+    def set_trace_id(trace_id: str):
+        trace_id_var.set(trace_id)
+
+    @staticmethod
+    def get_trace_id() -> Optional[str]:
+        try:
+            return trace_id_var.get()
+        except LookupError:
+            return None
+
+    @staticmethod
+    def set_user_context(user_id: str):
+        user_id_var.set(user_id)
+
+    @staticmethod
+    def get_user_id() -> Optional[str]:
+        try:
+            return user_id_var.get()
+        except LookupError:
+            return None
+
+class ContextualLogger(StructuredLogger):
+    def _log(self, level: str, message: str, **kwargs):
+        """Enhanced logging with automatic context"""
+        # Add correlation context
+        context_data = {
+            'trace_id': CorrelationContext.get_trace_id(),
+            'user_id': CorrelationContext.get_user_id()
+        }
+
+        # Remove None values
+        context_data = {k: v for k, v in context_data.items() if v is not None}
+
+        super()._log(level, message, **context_data, **kwargs)
+```
+
+## Distributed Tracing
+
+### OpenTelemetry Implementation
+```python
+# Example: OpenTelemetry tracing implementation
+from opentelemetry import trace
+from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+import functools
+
+# Initialize tracing
+resource = Resource.create({"service.name": "user-service", "service.version": "1.0"})
+trace.set_tracer_provider(TracerProvider(resource=resource))
+
+# Configure Jaeger exporter
+jaeger_exporter = JaegerExporter(
+    agent_host_name="jaeger-agent",
+    agent_port=6831,
+)
+
+span_processor = BatchSpanProcessor(jaeger_exporter)
+trace.get_tracer_provider().add_span_processor(span_processor)
+
+# Auto-instrument popular libraries
+RequestsInstrumentor().instrument()
+SQLAlchemyInstrumentor().instrument()
+
+tracer = trace.get_tracer(__name__)
+
+def trace_function(operation_name: str = None):
+    """Decorator to automatically trace function calls"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            span_name = operation_name or f"{func.__module__}.{func.__name__}"
+
+            with tracer.start_as_current_span(span_name) as span:
+                # Add function parameters as span attributes
+                span.set_attribute("function.name", func.__name__)
+                span.set_attribute("function.module", func.__module__)
+
+                # Add relevant parameters (avoid sensitive data)
+                safe_kwargs = {
+                    k: v for k, v in kwargs.items()
+                    if not any(sensitive in k.lower() for sensitive in ['password', 'token', 'secret'])
+                }
+
+                for key, value in safe_kwargs.items():
+                    span.set_attribute(f"function.param.{key}", str(value))
+
+                try:
+                    result = func(*args, **kwargs)
+                    span.set_attribute("function.result.success", True)
+                    return result
+
+                except Exception as e:
+                    span.set_attribute("function.result.success", False)
+                    span.set_attribute("function.error.type", type(e).__name__)
+                    span.set_attribute("function.error.message", str(e))
+                    span.record_exception(e)
+                    raise
+
+        return wrapper
+    return decorator
+
+# Usage examples
+@trace_function("user.authentication")
+def authenticate_user(username: str, password_hash: str) -> bool:
+    # Authentication logic
+    return True
+
+@trace_function("database.query")
+def get_user_data(user_id: str) -> dict:
+    # Database query logic
+    return {"user_id": user_id, "name": "John Doe"}
+```
+
+### Custom Span Context
+```python
+# Example: Custom span context management
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+import time
+
+class TracingContext:
+    def __init__(self, operation_name: str):
+        self.operation_name = operation_name
+        self.tracer = trace.get_tracer(__name__)
+        self.span = None
+
+    def __enter__(self):
+        self.span = self.tracer.start_span(self.operation_name)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.span.set_status(Status(StatusCode.ERROR, str(exc_val)))
+            self.span.record_exception(exc_val)
+        else:
+            self.span.set_status(Status(StatusCode.OK))
+
+        self.span.end()
+
+    def add_attribute(self, key: str, value):
+        """Add attribute to current span"""
+        if self.span:
+            self.span.set_attribute(key, value)
+
+    def add_event(self, name: str, attributes: dict = None):
+        """Add event to current span"""
+        if self.span:
+            self.span.add_event(name, attributes or {})
+
+# Usage
+def process_order(order_id: str, customer_id: str):
+    with TracingContext("order.processing") as ctx:
+        ctx.add_attribute("order.id", order_id)
+        ctx.add_attribute("customer.id", customer_id)
+
+        # Step 1: Validate order
+        ctx.add_event("order.validation.started")
+        validate_order(order_id)
+        ctx.add_event("order.validation.completed")
+
+        # Step 2: Process payment
+        ctx.add_event("payment.processing.started")
+        process_payment(order_id)
+        ctx.add_event("payment.processing.completed")
+
+        # Step 3: Update inventory
+        ctx.add_event("inventory.update.started")
+        update_inventory(order_id)
+        ctx.add_event("inventory.update.completed")
+```
+
+## Health Checks and Probes
+
+### Comprehensive Health Monitoring
+```python
+# Example: Multi-level health check implementation
+from typing import Dict, List, Optional
+from enum import Enum
+import asyncio
+import aiohttp
+import psutil
+import time
+
+class HealthStatus(Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+class HealthCheck:
+    def __init__(self, name: str, check_func, critical: bool = False):
+        self.name = name
+        self.check_func = check_func
+        self.critical = critical
+        self.last_check_time = 0
+        self.last_status = HealthStatus.HEALTHY
+        self.last_error = None
+
+    async def perform_check(self) -> Dict:
+        """Perform health check and return status"""
+        start_time = time.time()
+
+        try:
+            result = await self.check_func() if asyncio.iscoroutinefunction(self.check_func) else self.check_func()
+
+            self.last_status = HealthStatus.HEALTHY
+            self.last_error = None
+
+            return {
+                'name': self.name,
+                'status': self.last_status.value,
+                'critical': self.critical,
+                'duration_ms': (time.time() - start_time) * 1000,
+                'details': result
+            }
+
+        except Exception as e:
+            self.last_status = HealthStatus.UNHEALTHY
+            self.last_error = str(e)
+
+            return {
+                'name': self.name,
+                'status': self.last_status.value,
+                'critical': self.critical,
+                'duration_ms': (time.time() - start_time) * 1000,
+                'error': self.last_error
+            }
+        finally:
+            self.last_check_time = time.time()
+
+class HealthCheckManager:
+    def __init__(self):
+        self.checks: List[HealthCheck] = []
+        self.system_info = {}
+
+    def add_check(self, health_check: HealthCheck):
+        """Add health check to manager"""
+        self.checks.append(health_check)
+
+    async def run_all_checks(self) -> Dict:
+        """Run all registered health checks"""
+        check_results = []
+
+        # Run all checks concurrently
+        tasks = [check.perform_check() for check in self.checks]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                check_results.append({
+                    'name': 'unknown',
+                    'status': HealthStatus.UNHEALTHY.value,
+                    'error': str(result)
+                })
+            else:
+                check_results.append(result)
+
+        # Determine overall status
+        overall_status = self._calculate_overall_status(check_results)
+
+        return {
+            'status': overall_status.value,
+            'timestamp': time.time(),
+            'checks': check_results,
+            'system': self._get_system_info()
+        }
+
+    def _calculate_overall_status(self, results: List[Dict]) -> HealthStatus:
+        """Calculate overall system health status"""
+        critical_failures = [
+            r for r in results
+            if r.get('critical', False) and r['status'] != HealthStatus.HEALTHY.value
+        ]
+
+        if critical_failures:
+            return HealthStatus.UNHEALTHY
+
+        unhealthy_checks = [r for r in results if r['status'] == HealthStatus.UNHEALTHY.value]
+
+        if unhealthy_checks:
+            return HealthStatus.DEGRADED
+
+        return HealthStatus.HEALTHY
+
+    def _get_system_info(self) -> Dict:
+        """Get system resource information"""
+        return {
+            'cpu_percent': psutil.cpu_percent(),
+            'memory_percent': psutil.virtual_memory().percent,
+            'disk_percent': psutil.disk_usage('/').percent,
+            'uptime_seconds': time.time() - psutil.boot_time()
+        }
+
+# Example health checks
+async def database_health_check():
+    """Check database connectivity"""
+    # Implement database connection check
+    return {'connection': 'active', 'query_time_ms': 15}
+
+def memory_health_check():
+    """Check memory usage"""
+    memory = psutil.virtual_memory()
+    if memory.percent > 90:
+        raise Exception(f"Memory usage too high: {memory.percent}%")
+    return {'usage_percent': memory.percent, 'available_gb': memory.available / (1024**3)}
+
+async def external_service_health_check():
+    """Check external service availability"""
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://api.external-service.com/health') as response:
+            if response.status != 200:
+                raise Exception(f"External service returned {response.status}")
+            return {'status_code': response.status, 'response_time_ms': 100}
+
+# Setup health checks
+health_manager = HealthCheckManager()
+health_manager.add_check(HealthCheck("database", database_health_check, critical=True))
+health_manager.add_check(HealthCheck("memory", memory_health_check, critical=True))
+health_manager.add_check(HealthCheck("external_service", external_service_health_check, critical=False))
+```
+
+## Error Tracking and Alerting
+
+### Intelligent Error Tracking
+```python
+# Example: Smart error tracking with context
+import hashlib
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import Dict, List, Set
+
+class ErrorTracker:
+    def __init__(self):
+        self.error_patterns = defaultdict(list)
+        self.error_rates = defaultdict(float)
+        self.suppressed_errors = set()
+        self.alert_cooldowns = {}
+
+    def track_error(self, error: Exception, context: Dict) -> Dict:
+        """Track error with intelligent deduplication and alerting"""
+        error_signature = self._generate_error_signature(error, context)
+        error_info = {
+            'signature': error_signature,
+            'type': type(error).__name__,
+            'message': str(error),
+            'context': context,
+            'timestamp': datetime.utcnow(),
+            'stack_trace': traceback.format_exc()
+        }
+
+        # Store error pattern
+        self.error_patterns[error_signature].append(error_info)
+
+        # Calculate error rate
+        recent_errors = self._get_recent_errors(error_signature, minutes=5)
+        error_rate = len(recent_errors) / 5  # errors per minute
+        self.error_rates[error_signature] = error_rate
+
+        # Determine if alert should be sent
+        should_alert = self._should_alert(error_signature, error_rate)
+
+        return {
+            'error_signature': error_signature,
+            'error_rate': error_rate,
+            'total_occurrences': len(self.error_patterns[error_signature]),
+            'should_alert': should_alert,
+            'suppressed': error_signature in self.suppressed_errors
+        }
+
+    def _generate_error_signature(self, error: Exception, context: Dict) -> str:
+        """Generate unique signature for error deduplication"""
+        signature_components = [
+            type(error).__name__,
+            str(error),
+            context.get('function_name', ''),
+            context.get('service_name', ''),
+            # Include first few lines of stack trace for uniqueness
+            ''.join(traceback.format_exc().split('\n')[:3])
+        ]
+
+        signature = '|'.join(signature_components)
+        return hashlib.md5(signature.encode()).hexdigest()
+
+    def _should_alert(self, error_signature: str, error_rate: float) -> bool:
+        """Determine if error should trigger alert"""
+        # Check if error is suppressed
+        if error_signature in self.suppressed_errors:
+            return False
+
+        # Check cooldown period
+        if error_signature in self.alert_cooldowns:
+            cooldown_until = self.alert_cooldowns[error_signature]
+            if datetime.utcnow() < cooldown_until:
+                return False
+
+        # Alert on high error rates
+        if error_rate > 5:  # More than 5 errors per minute
+            self.alert_cooldowns[error_signature] = datetime.utcnow() + timedelta(minutes=15)
+            return True
+
+        # Alert on first occurrence of new error types
+        if len(self.error_patterns[error_signature]) == 1:
+            return True
+
+        return False
+
+    def get_error_summary(self, time_window: int = 3600) -> Dict:
+        """Get error summary for specified time window"""
+        cutoff_time = datetime.utcnow() - timedelta(seconds=time_window)
+
+        summary = {
+            'total_errors': 0,
+            'unique_errors': 0,
+            'top_errors': [],
+            'error_rate_trend': []
+        }
+
+        for signature, errors in self.error_patterns.items():
+            recent_errors = [e for e in errors if e['timestamp'] > cutoff_time]
+
+            if recent_errors:
+                summary['total_errors'] += len(recent_errors)
+                summary['unique_errors'] += 1
+
+                # Add to top errors
+                summary['top_errors'].append({
+                    'signature': signature,
+                    'count': len(recent_errors),
+                    'latest_error': recent_errors[-1],
+                    'error_rate': self.error_rates[signature]
+                })
+
+        # Sort top errors by frequency
+        summary['top_errors'].sort(key=lambda x: x['count'], reverse=True)
+        summary['top_errors'] = summary['top_errors'][:10]
+
+        return summary
+```
+
+## Observability Testing
+
+### Testing Observable Systems
+```python
+# Example: Testing observability implementations
+import pytest
+from unittest.mock import Mock, patch
+import json
+
+class TestObservability:
+    def test_structured_logging_format(self):
+        """Test that logs are properly structured"""
+        logger = StructuredLogger('test-service', '1.0.0')
+
+        with patch('logging.Logger.info') as mock_log:
+            logger.info('Test message', user_id='123', action='test')
+
+            # Verify log was called
+            mock_log.assert_called_once()
+
+            # Parse and validate log structure
+            log_message = mock_log.call_args[0][0]
+            log_data = json.loads(log_message)
+
+            assert 'timestamp' in log_data
+            assert log_data['level'] == 'INFO'
+            assert log_data['service'] == 'test-service'
+            assert log_data['message'] == 'Test message'
+            assert log_data['user_id'] == '123'
+
+    def test_metrics_collection(self):
+        """Test metrics are properly collected"""
+        with patch('prometheus_client.Counter.inc') as mock_counter:
+
+            @observe_requests
+            def test_endpoint(method='GET', endpoint='/test'):
+                return Mock(status_code=200)
+
+            test_endpoint()
+
+            # Verify counter was incremented
+            mock_counter.assert_called_once()
+
+    def test_health_check_failure_handling(self):
+        """Test health check failure scenarios"""
+        def failing_check():
+            raise Exception("Service unavailable")
+
+        health_check = HealthCheck("test_service", failing_check, critical=True)
+
+        result = asyncio.run(health_check.perform_check())
+
+        assert result['status'] == HealthStatus.UNHEALTHY.value
+        assert result['critical'] is True
+        assert 'error' in result
+
+    def test_error_deduplication(self):
+        """Test error tracking deduplication"""
+        tracker = ErrorTracker()
+
+        # Track same error multiple times
+        error = ValueError("Test error")
+        context = {'function_name': 'test_func', 'service_name': 'test_service'}
+
+        result1 = tracker.track_error(error, context)
+        result2 = tracker.track_error(error, context)
+
+        # Should have same signature
+        assert result1['error_signature'] == result2['error_signature']
+        assert result2['total_occurrences'] == 2
+
+    def test_trace_correlation(self):
+        """Test trace ID correlation across logs"""
+        trace_id = "test-trace-123"
+        CorrelationContext.set_trace_id(trace_id)
+
+        logger = ContextualLogger('test-service', '1.0.0')
+
+        with patch('logging.Logger.info') as mock_log:
+            logger.info('Correlated message')
+
+            log_message = mock_log.call_args[0][0]
+            log_data = json.loads(log_message)
+
+            assert log_data['trace_id'] == trace_id
+```
+
+## Performance Monitoring
+
+### Application Performance Monitoring (APM)
+```python
+# Example: Custom APM implementation
+import time
+import statistics
+from collections import defaultdict, deque
+from typing import Dict, List
+
+class PerformanceMonitor:
+    def __init__(self, window_size: int = 1000):
+        self.window_size = window_size
+        self.metrics = defaultdict(lambda: deque(maxlen=window_size))
+        self.counters = defaultdict(int)
+
+    def record_duration(self, operation: str, duration: float):
+        """Record operation duration"""
+        self.metrics[f"{operation}_duration"].append(duration)
+        self.counters[f"{operation}_count"] += 1
+
+    def record_throughput(self, operation: str, count: int = 1):
+        """Record operation throughput"""
+        self.counters[f"{operation}_throughput"] += count
+
+    def get_performance_summary(self, operation: str) -> Dict:
+        """Get performance summary for operation"""
+        duration_key = f"{operation}_duration"
+        durations = list(self.metrics[duration_key])
+
+        if not durations:
+            return {'operation': operation, 'no_data': True}
+
+        return {
+            'operation': operation,
+            'count': len(durations),
+            'avg_duration': statistics.mean(durations),
+            'p50_duration': statistics.median(durations),
+            'p95_duration': self._percentile(durations, 95),
+            'p99_duration': self._percentile(durations, 99),
+            'min_duration': min(durations),
+            'max_duration': max(durations),
+            'throughput': self.counters[f"{operation}_throughput"]
+        }
+
+    def _percentile(self, data: List[float], percentile: int) -> float:
+        """Calculate percentile of data"""
+        if not data:
+            return 0.0
+        sorted_data = sorted(data)
+        index = int(len(sorted_data) * percentile / 100)
+        return sorted_data[min(index, len(sorted_data) - 1)]
+
+# Performance monitoring decorator
+def monitor_performance(operation_name: str = None):
+    """Decorator to monitor function performance"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            op_name = operation_name or f"{func.__module__}.{func.__name__}"
+            start_time = time.time()
+
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+
+                # Record successful operation
+                perf_monitor.record_duration(op_name, duration)
+                perf_monitor.record_throughput(f"{op_name}_success")
+
+                return result
+
+            except Exception as e:
+                duration = time.time() - start_time
+
+                # Record failed operation
+                perf_monitor.record_duration(f"{op_name}_error", duration)
+                perf_monitor.record_throughput(f"{op_name}_error")
+
+                raise
+
+        return wrapper
+    return decorator
+
+# Global performance monitor instance
+perf_monitor = PerformanceMonitor()
+```
+
+## Best Practices and Anti-Patterns
+
+### Best Practices
+✅ Implement structured logging with consistent schema
+✅ Use distributed tracing for complex workflows
+✅ Create meaningful metrics with proper labels
+✅ Implement health checks at multiple levels
+✅ Correlate logs, metrics, and traces
+✅ Monitor business metrics, not just technical ones
+✅ Implement proper error aggregation and deduplication
+✅ Use appropriate sampling for high-volume traces
+
+### Anti-Patterns to Avoid
+❌ Logging sensitive information without proper sanitization
+❌ Creating metrics with unbounded cardinality
+❌ Over-instrumenting low-value code paths
+❌ Ignoring performance impact of observability code
+❌ Not testing observability features
+❌ Creating alerts without proper context
+❌ Storing logs indefinitely without retention policies
+❌ Not correlating related events across services
+
+## Tool Integration
+
+### Popular Observability Stacks
+- **Metrics**: Prometheus + Grafana, DataDog, New Relic
+- **Logging**: ELK Stack, Splunk, Fluentd + ElasticSearch
+- **Tracing**: Jaeger, Zipkin, AWS X-Ray, Azure Application Insights
+- **APM**: New Relic, DataDog APM, Elastic APM, Dynatrace
+- **All-in-One**: Honeycomb, Lightstep, Observability platforms
+
+### Cloud Platform Integration
+- **AWS**: CloudWatch, X-Ray, CloudTrail
+- **Azure**: Application Insights, Log Analytics, Monitor
+- **GCP**: Operations Suite (formerly Stackdriver)
+- **Kubernetes**: Prometheus Operator, Jaeger Operator, Fluentd

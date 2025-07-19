@@ -1,0 +1,1299 @@
+---
+description: Monitoring Rules and Best Practices
+globs:
+alwaysApply: false
+---
+# Monitoring Rules and Best Practices
+
+This file contains rules for monitoring-related code generation. It guides the AI in generating code that adheres to best practices in system monitoring, alerting, and performance tracking.
+
+## Core Monitoring Principles
+
+### Monitoring Philosophy
+- Monitor symptoms, not causes - focus on user-visible problems
+- Use the four golden signals: latency, traffic, errors, and saturation
+- Implement monitoring at multiple layers: infrastructure, application, and business
+- Design for actionable alerts that require human intervention
+- Build dashboards that tell a story about system health
+
+### Monitoring Strategy
+- Proactive vs. reactive monitoring approach
+- Risk-based monitoring prioritization
+- Service Level Objectives (SLOs) and Service Level Indicators (SLIs)
+- Error budgets and burn rate calculations
+- Multi-dimensional monitoring with proper tagging
+
+## Infrastructure Monitoring
+
+### System Resource Monitoring
+```python
+# Example: Comprehensive system resource monitoring
+import psutil
+import time
+from typing import Dict, List
+from dataclasses import dataclass
+from prometheus_client import Gauge, Counter, Histogram
+
+# Define Prometheus metrics
+CPU_USAGE = Gauge('system_cpu_usage_percent', 'CPU usage percentage')
+MEMORY_USAGE = Gauge('system_memory_usage_percent', 'Memory usage percentage')
+DISK_USAGE = Gauge('system_disk_usage_percent', 'Disk usage percentage', ['device'])
+NETWORK_IO = Counter('system_network_io_bytes_total', 'Network I/O bytes', ['direction', 'interface'])
+PROCESS_COUNT = Gauge('system_process_count', 'Number of running processes')
+
+@dataclass
+class SystemMetrics:
+    cpu_percent: float
+    memory_percent: float
+    disk_usage: Dict[str, float]
+    network_io: Dict[str, Dict[str, int]]
+    process_count: int
+    load_average: List[float]
+    uptime: float
+
+class SystemMonitor:
+    def __init__(self, collection_interval: int = 60):
+        self.collection_interval = collection_interval
+        self.baseline_metrics = {}
+        self.alert_thresholds = {
+            'cpu_critical': 90.0,
+            'cpu_warning': 80.0,
+            'memory_critical': 95.0,
+            'memory_warning': 85.0,
+            'disk_critical': 95.0,
+            'disk_warning': 85.0
+        }
+
+    def collect_metrics(self) -> SystemMetrics:
+        """Collect comprehensive system metrics"""
+        # CPU metrics
+        cpu_percent = psutil.cpu_percent(interval=1)
+        CPU_USAGE.set(cpu_percent)
+
+        # Memory metrics
+        memory = psutil.virtual_memory()
+        MEMORY_USAGE.set(memory.percent)
+
+        # Disk metrics
+        disk_usage = {}
+        for partition in psutil.disk_partitions():
+            if partition.fstype:  # Skip system partitions
+                try:
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    usage_percent = (usage.used / usage.total) * 100
+                    disk_usage[partition.device] = usage_percent
+                    DISK_USAGE.labels(device=partition.device).set(usage_percent)
+                except PermissionError:
+                    continue
+
+        # Network metrics
+        network_io = {}
+        net_counters = psutil.net_io_counters(pernic=True)
+        for interface, counters in net_counters.items():
+            network_io[interface] = {
+                'bytes_sent': counters.bytes_sent,
+                'bytes_recv': counters.bytes_recv,
+                'packets_sent': counters.packets_sent,
+                'packets_recv': counters.packets_recv
+            }
+
+            NETWORK_IO.labels(direction='sent', interface=interface).inc(counters.bytes_sent)
+            NETWORK_IO.labels(direction='received', interface=interface).inc(counters.bytes_recv)
+
+        # Process metrics
+        process_count = len(psutil.pids())
+        PROCESS_COUNT.set(process_count)
+
+        # Load average
+        load_avg = psutil.getloadavg() if hasattr(psutil, 'getloadavg') else [0, 0, 0]
+
+        # System uptime
+        uptime = time.time() - psutil.boot_time()
+
+        return SystemMetrics(
+            cpu_percent=cpu_percent,
+            memory_percent=memory.percent,
+            disk_usage=disk_usage,
+            network_io=network_io,
+            process_count=process_count,
+            load_average=list(load_avg),
+            uptime=uptime
+        )
+
+    def check_thresholds(self, metrics: SystemMetrics) -> List[Dict]:
+        """Check metrics against defined thresholds"""
+        alerts = []
+
+        # CPU threshold checks
+        if metrics.cpu_percent >= self.alert_thresholds['cpu_critical']:
+            alerts.append({
+                'metric': 'cpu_usage',
+                'severity': 'critical',
+                'value': metrics.cpu_percent,
+                'threshold': self.alert_thresholds['cpu_critical'],
+                'message': f'CPU usage critical: {metrics.cpu_percent:.1f}%'
+            })
+        elif metrics.cpu_percent >= self.alert_thresholds['cpu_warning']:
+            alerts.append({
+                'metric': 'cpu_usage',
+                'severity': 'warning',
+                'value': metrics.cpu_percent,
+                'threshold': self.alert_thresholds['cpu_warning'],
+                'message': f'CPU usage warning: {metrics.cpu_percent:.1f}%'
+            })
+
+        # Memory threshold checks
+        if metrics.memory_percent >= self.alert_thresholds['memory_critical']:
+            alerts.append({
+                'metric': 'memory_usage',
+                'severity': 'critical',
+                'value': metrics.memory_percent,
+                'threshold': self.alert_thresholds['memory_critical'],
+                'message': f'Memory usage critical: {metrics.memory_percent:.1f}%'
+            })
+
+        # Disk threshold checks
+        for device, usage in metrics.disk_usage.items():
+            if usage >= self.alert_thresholds['disk_critical']:
+                alerts.append({
+                    'metric': 'disk_usage',
+                    'severity': 'critical',
+                    'value': usage,
+                    'threshold': self.alert_thresholds['disk_critical'],
+                    'message': f'Disk usage critical on {device}: {usage:.1f}%'
+                })
+
+        return alerts
+```
+
+### Container and Kubernetes Monitoring
+```python
+# Example: Kubernetes pod monitoring
+from kubernetes import client, config
+from typing import Optional
+import requests
+
+class KubernetesMonitor:
+    def __init__(self):
+        # Load kubernetes config
+        try:
+            config.load_incluster_config()  # For in-cluster execution
+        except:
+            config.load_kube_config()  # For local development
+
+        self.v1 = client.CoreV1Api()
+        self.apps_v1 = client.AppsV1Api()
+        self.metrics_v1beta1 = client.CustomObjectsApi()
+
+    def get_pod_metrics(self, namespace: str = 'default') -> List[Dict]:
+        """Get resource usage metrics for pods"""
+        pod_metrics = []
+
+        try:
+            # Get pod metrics from metrics server
+            metrics = self.metrics_v1beta1.list_namespaced_custom_object(
+                group="metrics.k8s.io",
+                version="v1beta1",
+                namespace=namespace,
+                plural="pods"
+            )
+
+            for pod_metric in metrics['items']:
+                pod_name = pod_metric['metadata']['name']
+
+                total_cpu = 0
+                total_memory = 0
+
+                for container in pod_metric['containers']:
+                    cpu_usage = self._parse_cpu_usage(container['usage']['cpu'])
+                    memory_usage = self._parse_memory_usage(container['usage']['memory'])
+
+                    total_cpu += cpu_usage
+                    total_memory += memory_usage
+
+                pod_metrics.append({
+                    'name': pod_name,
+                    'namespace': namespace,
+                    'cpu_usage_millicores': total_cpu,
+                    'memory_usage_bytes': total_memory,
+                    'timestamp': pod_metric['timestamp']
+                })
+
+        except Exception as e:
+            print(f"Error getting pod metrics: {e}")
+
+        return pod_metrics
+
+    def get_deployment_status(self, namespace: str = 'default') -> List[Dict]:
+        """Get deployment status and health"""
+        deployment_status = []
+
+        deployments = self.apps_v1.list_namespaced_deployment(namespace=namespace)
+
+        for deployment in deployments.items:
+            status = deployment.status
+            spec = deployment.spec
+
+            deployment_status.append({
+                'name': deployment.metadata.name,
+                'namespace': namespace,
+                'desired_replicas': spec.replicas,
+                'ready_replicas': status.ready_replicas or 0,
+                'available_replicas': status.available_replicas or 0,
+                'unavailable_replicas': status.unavailable_replicas or 0,
+                'health_status': self._calculate_deployment_health(status, spec)
+            })
+
+        return deployment_status
+
+    def _parse_cpu_usage(self, cpu_str: str) -> float:
+        """Parse CPU usage string to millicores"""
+        if cpu_str.endswith('n'):
+            return float(cpu_str[:-1]) / 1_000_000  # nanocores to millicores
+        elif cpu_str.endswith('u'):
+            return float(cpu_str[:-1]) / 1_000  # microcores to millicores
+        elif cpu_str.endswith('m'):
+            return float(cpu_str[:-1])  # millicores
+        else:
+            return float(cpu_str) * 1000  # cores to millicores
+
+    def _parse_memory_usage(self, memory_str: str) -> int:
+        """Parse memory usage string to bytes"""
+        multipliers = {
+            'Ki': 1024,
+            'Mi': 1024 ** 2,
+            'Gi': 1024 ** 3,
+            'Ti': 1024 ** 4
+        }
+
+        for suffix, multiplier in multipliers.items():
+            if memory_str.endswith(suffix):
+                return int(float(memory_str[:-2]) * multiplier)
+
+        return int(memory_str)  # Assume bytes if no suffix
+
+    def _calculate_deployment_health(self, status, spec) -> str:
+        """Calculate deployment health status"""
+        desired = spec.replicas
+        ready = status.ready_replicas or 0
+
+        if ready == desired:
+            return 'healthy'
+        elif ready > 0:
+            return 'degraded'
+        else:
+            return 'unhealthy'
+```
+
+## Application Performance Monitoring
+
+### Application Metrics Collection
+```python
+# Example: Application-level monitoring
+from prometheus_client import Counter, Histogram, Gauge, Summary
+import time
+import functools
+from typing import Dict, Callable
+from contextlib import contextmanager
+
+# Application metrics
+REQUEST_COUNT = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status_code', 'user_type']
+)
+
+REQUEST_DURATION = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration',
+    ['method', 'endpoint'],
+    buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
+
+ACTIVE_REQUESTS = Gauge(
+    'http_requests_active',
+    'Currently active HTTP requests',
+    ['endpoint']
+)
+
+DATABASE_OPERATIONS = Histogram(
+    'database_operation_duration_seconds',
+    'Database operation duration',
+    ['operation', 'table'],
+    buckets=[0.001, 0.01, 0.1, 0.5, 1.0, 5.0]
+)
+
+CACHE_OPERATIONS = Counter(
+    'cache_operations_total',
+    'Cache operations',
+    ['operation', 'result']
+)
+
+BUSINESS_EVENTS = Counter(
+    'business_events_total',
+    'Business events',
+    ['event_type', 'outcome']
+)
+
+class ApplicationMonitor:
+    def __init__(self):
+        self.request_contexts = {}
+
+    @contextmanager
+    def monitor_request(self, method: str, endpoint: str, user_type: str = 'anonymous'):
+        """Context manager for monitoring HTTP requests"""
+        start_time = time.time()
+
+        # Increment active requests
+        ACTIVE_REQUESTS.labels(endpoint=endpoint).inc()
+
+        try:
+            yield
+
+            # Record successful request
+            duration = time.time() - start_time
+            REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(duration)
+            REQUEST_COUNT.labels(
+                method=method,
+                endpoint=endpoint,
+                status_code='200',
+                user_type=user_type
+            ).inc()
+
+        except Exception as e:
+            # Record failed request
+            duration = time.time() - start_time
+            REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(duration)
+
+            # Determine status code from exception type
+            status_code = self._get_status_code_from_exception(e)
+            REQUEST_COUNT.labels(
+                method=method,
+                endpoint=endpoint,
+                status_code=str(status_code),
+                user_type=user_type
+            ).inc()
+
+            raise
+
+        finally:
+            # Decrement active requests
+            ACTIVE_REQUESTS.labels(endpoint=endpoint).dec()
+
+    def monitor_database_operation(self, operation: str, table: str):
+        """Context manager for monitoring database operations"""
+        @contextmanager
+        def _monitor():
+            start_time = time.time()
+            try:
+                yield
+                duration = time.time() - start_time
+                DATABASE_OPERATIONS.labels(operation=operation, table=table).observe(duration)
+            except Exception:
+                duration = time.time() - start_time
+                DATABASE_OPERATIONS.labels(operation=operation, table=table).observe(duration)
+                raise
+
+        return _monitor()
+
+    def record_cache_operation(self, operation: str, hit: bool):
+        """Record cache operation metrics"""
+        result = 'hit' if hit else 'miss'
+        CACHE_OPERATIONS.labels(operation=operation, result=result).inc()
+
+    def record_business_event(self, event_type: str, success: bool):
+        """Record business event metrics"""
+        outcome = 'success' if success else 'failure'
+        BUSINESS_EVENTS.labels(event_type=event_type, outcome=outcome).inc()
+
+    def _get_status_code_from_exception(self, exception: Exception) -> int:
+        """Map exception types to HTTP status codes"""
+        exception_mapping = {
+            'ValueError': 400,
+            'PermissionError': 403,
+            'FileNotFoundError': 404,
+            'TimeoutError': 408,
+            'ConnectionError': 503
+        }
+
+        return exception_mapping.get(type(exception).__name__, 500)
+
+# Usage example
+app_monitor = ApplicationMonitor()
+
+def api_endpoint_handler(request):
+    """Example API endpoint with monitoring"""
+    with app_monitor.monitor_request(
+        method=request.method,
+        endpoint=request.path,
+        user_type='premium' if request.user.is_premium else 'free'
+    ):
+        # Database operation
+        with app_monitor.monitor_database_operation('SELECT', 'users'):
+            user_data = database.get_user(request.user.id)
+
+        # Cache operation
+        cache_key = f"user_profile_{request.user.id}"
+        cached_data = cache.get(cache_key)
+        app_monitor.record_cache_operation('get', cached_data is not None)
+
+        if not cached_data:
+            with app_monitor.monitor_database_operation('SELECT', 'user_profiles'):
+                cached_data = database.get_user_profile(request.user.id)
+                cache.set(cache_key, cached_data, ttl=300)
+
+        # Business event
+        app_monitor.record_business_event('profile_view', True)
+
+        return {'user': user_data, 'profile': cached_data}
+```
+
+## Alerting and Notification
+
+### Intelligent Alerting System
+```python
+# Example: Smart alerting system with escalation
+from enum import Enum
+from typing import List, Dict, Optional, Callable
+from datetime import datetime, timedelta
+import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+class AlertSeverity(Enum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+class AlertChannel(Enum):
+    EMAIL = "email"
+    SLACK = "slack"
+    PAGERDUTY = "pagerduty"
+    WEBHOOK = "webhook"
+
+class Alert:
+    def __init__(self, name: str, severity: AlertSeverity, message: str,
+                 source: str, metric_value: Optional[float] = None,
+                 threshold: Optional[float] = None, metadata: Optional[Dict] = None):
+        self.id = self._generate_alert_id()
+        self.name = name
+        self.severity = severity
+        self.message = message
+        self.source = source
+        self.metric_value = metric_value
+        self.threshold = threshold
+        self.metadata = metadata or {}
+        self.created_at = datetime.utcnow()
+        self.acknowledged = False
+        self.resolved = False
+
+    def _generate_alert_id(self) -> str:
+        """Generate unique alert ID"""
+        import uuid
+        return str(uuid.uuid4())[:8]
+
+class AlertRule:
+    def __init__(self, name: str, condition: Callable[[Dict], bool],
+                 severity: AlertSeverity, channels: List[AlertChannel],
+                 cooldown_minutes: int = 30, escalation_rules: Optional[List] = None):
+        self.name = name
+        self.condition = condition
+        self.severity = severity
+        self.channels = channels
+        self.cooldown_minutes = cooldown_minutes
+        self.escalation_rules = escalation_rules or []
+        self.last_triggered = None
+
+    def should_trigger(self, metrics: Dict) -> bool:
+        """Check if alert rule should trigger"""
+        # Check cooldown period
+        if self.last_triggered:
+            cooldown_end = self.last_triggered + timedelta(minutes=self.cooldown_minutes)
+            if datetime.utcnow() < cooldown_end:
+                return False
+
+        return self.condition(metrics)
+
+class AlertManager:
+    def __init__(self):
+        self.rules: List[AlertRule] = []
+        self.active_alerts: Dict[str, Alert] = {}
+        self.alert_history: List[Alert] = []
+        self.notification_handlers = {
+            AlertChannel.EMAIL: self._send_email_notification,
+            AlertChannel.SLACK: self._send_slack_notification,
+            AlertChannel.WEBHOOK: self._send_webhook_notification
+        }
+
+    def add_rule(self, rule: AlertRule):
+        """Add alert rule to manager"""
+        self.rules.append(rule)
+
+    def evaluate_rules(self, metrics: Dict):
+        """Evaluate all alert rules against current metrics"""
+        for rule in self.rules:
+            if rule.should_trigger(metrics):
+                alert = self._create_alert_from_rule(rule, metrics)
+                self._process_alert(alert)
+                rule.last_triggered = datetime.utcnow()
+
+    def _create_alert_from_rule(self, rule: AlertRule, metrics: Dict) -> Alert:
+        """Create alert instance from triggered rule"""
+        metric_name = rule.name.replace('_alert', '').replace('_', '.')
+        metric_value = metrics.get(metric_name)
+
+        return Alert(
+            name=rule.name,
+            severity=rule.severity,
+            message=f"Alert triggered: {rule.name}",
+            source="monitoring_system",
+            metric_value=metric_value,
+            metadata={
+                'rule_name': rule.name,
+                'metrics_snapshot': metrics,
+                'channels': [c.value for c in rule.channels]
+            }
+        )
+
+    def _process_alert(self, alert: Alert):
+        """Process new alert"""
+        # Check for duplicate active alerts
+        duplicate_key = f"{alert.name}_{alert.source}"
+
+        if duplicate_key in self.active_alerts:
+            # Update existing alert
+            existing_alert = self.active_alerts[duplicate_key]
+            existing_alert.metadata['occurrence_count'] = \
+                existing_alert.metadata.get('occurrence_count', 1) + 1
+            existing_alert.metadata['last_seen'] = datetime.utcnow().isoformat()
+        else:
+            # New alert
+            self.active_alerts[duplicate_key] = alert
+            self.alert_history.append(alert)
+
+            # Send notifications
+            self._send_notifications(alert)
+
+    def _send_notifications(self, alert: Alert):
+        """Send alert notifications through configured channels"""
+        channels = alert.metadata.get('channels', [])
+
+        for channel_name in channels:
+            try:
+                channel = AlertChannel(channel_name)
+                handler = self.notification_handlers.get(channel)
+
+                if handler:
+                    handler(alert)
+
+            except Exception as e:
+                print(f"Failed to send notification via {channel_name}: {e}")
+
+    def _send_email_notification(self, alert: Alert):
+        """Send email notification"""
+        # Email configuration would come from environment variables
+        smtp_server = "smtp.example.com"
+        smtp_port = 587
+        sender_email = "alerts@example.com"
+        sender_password = "password"
+        recipient_email = "admin@example.com"
+
+        message = MIMEMultipart()
+        message["From"] = sender_email
+        message["To"] = recipient_email
+        message["Subject"] = f"[{alert.severity.value.upper()}] {alert.name}"
+
+        body = f"""
+        Alert Details:
+        - Name: {alert.name}
+        - Severity: {alert.severity.value}
+        - Message: {alert.message}
+        - Source: {alert.source}
+        - Created: {alert.created_at}
+        - Metric Value: {alert.metric_value}
+        - Threshold: {alert.threshold}
+
+        Metadata:
+        {json.dumps(alert.metadata, indent=2)}
+        """
+
+        message.attach(MIMEText(body, "plain"))
+
+        # Send email (in production, use proper error handling and configuration)
+        try:
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(message)
+            server.quit()
+        except Exception as e:
+            print(f"Failed to send email: {e}")
+
+    def _send_slack_notification(self, alert: Alert):
+        """Send Slack notification"""
+        import requests
+
+        webhook_url = "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+
+        color_map = {
+            AlertSeverity.INFO: "good",
+            AlertSeverity.WARNING: "warning",
+            AlertSeverity.CRITICAL: "danger"
+        }
+
+        payload = {
+            "attachments": [{
+                "color": color_map.get(alert.severity, "warning"),
+                "title": f"{alert.severity.value.upper()}: {alert.name}",
+                "text": alert.message,
+                "fields": [
+                    {"title": "Source", "value": alert.source, "short": True},
+                    {"title": "Created", "value": alert.created_at.isoformat(), "short": True},
+                    {"title": "Alert ID", "value": alert.id, "short": True}
+                ]
+            }]
+        }
+
+        if alert.metric_value is not None:
+            payload["attachments"][0]["fields"].append({
+                "title": "Metric Value",
+                "value": str(alert.metric_value),
+                "short": True
+            })
+
+        try:
+            response = requests.post(webhook_url, json=payload)
+            response.raise_for_status()
+        except Exception as e:
+            print(f"Failed to send Slack notification: {e}")
+
+    def _send_webhook_notification(self, alert: Alert):
+        """Send webhook notification"""
+        import requests
+
+        webhook_url = "https://your-webhook-endpoint.com/alerts"
+
+        payload = {
+            "alert_id": alert.id,
+            "name": alert.name,
+            "severity": alert.severity.value,
+            "message": alert.message,
+            "source": alert.source,
+            "created_at": alert.created_at.isoformat(),
+            "metric_value": alert.metric_value,
+            "threshold": alert.threshold,
+            "metadata": alert.metadata
+        }
+
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=10)
+            response.raise_for_status()
+        except Exception as e:
+            print(f"Failed to send webhook notification: {e}")
+
+# Example alert rules
+def create_standard_alert_rules() -> List[AlertRule]:
+    """Create standard monitoring alert rules"""
+    return [
+        # CPU usage alert
+        AlertRule(
+            name="high_cpu_usage",
+            condition=lambda m: m.get('system.cpu.usage', 0) > 85,
+            severity=AlertSeverity.WARNING,
+            channels=[AlertChannel.EMAIL, AlertChannel.SLACK],
+            cooldown_minutes=15
+        ),
+
+        # Critical CPU usage alert
+        AlertRule(
+            name="critical_cpu_usage",
+            condition=lambda m: m.get('system.cpu.usage', 0) > 95,
+            severity=AlertSeverity.CRITICAL,
+            channels=[AlertChannel.EMAIL, AlertChannel.SLACK, AlertChannel.PAGERDUTY],
+            cooldown_minutes=5
+        ),
+
+        # Memory usage alert
+        AlertRule(
+            name="high_memory_usage",
+            condition=lambda m: m.get('system.memory.usage', 0) > 90,
+            severity=AlertSeverity.WARNING,
+            channels=[AlertChannel.SLACK],
+            cooldown_minutes=30
+        ),
+
+        # Application error rate alert
+        AlertRule(
+            name="high_error_rate",
+            condition=lambda m: m.get('application.error_rate', 0) > 5,
+            severity=AlertSeverity.CRITICAL,
+            channels=[AlertChannel.EMAIL, AlertChannel.SLACK],
+            cooldown_minutes=10
+        ),
+
+        # Response time alert
+        AlertRule(
+            name="slow_response_time",
+            condition=lambda m: m.get('application.response_time_p95', 0) > 2.0,
+            severity=AlertSeverity.WARNING,
+            channels=[AlertChannel.SLACK],
+            cooldown_minutes=20
+        )
+    ]
+```
+
+## Service Level Objectives (SLOs)
+
+### SLO Implementation and Monitoring
+```python
+# Example: SLO monitoring and error budget calculation
+from typing import Dict, List, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+import math
+
+@dataclass
+class SLI:
+    """Service Level Indicator"""
+    name: str
+    good_events: int
+    total_events: int
+    timestamp: datetime
+
+    @property
+    def ratio(self) -> float:
+        if self.total_events == 0:
+            return 1.0
+        return self.good_events / self.total_events
+
+@dataclass
+class SLO:
+    """Service Level Objective"""
+    name: str
+    target: float  # Target SLI ratio (e.g., 0.999 for 99.9%)
+    time_window: timedelta
+    error_budget_policy: str = "monthly"
+
+class SLOMonitor:
+    def __init__(self):
+        self.slos: Dict[str, SLO] = {}
+        self.sli_history: Dict[str, List[SLI]] = {}
+
+    def register_slo(self, slo: SLO):
+        """Register an SLO for monitoring"""
+        self.slos[slo.name] = slo
+        self.sli_history[slo.name] = []
+
+    def record_sli(self, slo_name: str, good_events: int, total_events: int):
+        """Record SLI measurement"""
+        if slo_name not in self.slos:
+            raise ValueError(f"SLO {slo_name} not registered")
+
+        sli = SLI(
+            name=slo_name,
+            good_events=good_events,
+            total_events=total_events,
+            timestamp=datetime.utcnow()
+        )
+
+        self.sli_history[slo_name].append(sli)
+
+        # Keep only relevant history
+        self._cleanup_old_sli_data(slo_name)
+
+    def calculate_slo_status(self, slo_name: str) -> Dict:
+        """Calculate current SLO status and error budget"""
+        if slo_name not in self.slos:
+            raise ValueError(f"SLO {slo_name} not registered")
+
+        slo = self.slos[slo_name]
+        recent_slis = self._get_recent_slis(slo_name, slo.time_window)
+
+        if not recent_slis:
+            return {
+                'slo_name': slo_name,
+                'status': 'no_data',
+                'current_sli': 0.0,
+                'target_sli': slo.target,
+                'error_budget_remaining': 1.0,
+                'burn_rate': 0.0
+            }
+
+        # Calculate current SLI
+        total_good = sum(sli.good_events for sli in recent_slis)
+        total_events = sum(sli.total_events for sli in recent_slis)
+        current_sli = total_good / total_events if total_events > 0 else 1.0
+
+        # Calculate error budget
+        error_budget_consumed = max(0, (slo.target - current_sli) / (1 - slo.target))
+        error_budget_remaining = 1.0 - error_budget_consumed
+
+        # Calculate burn rate (errors per hour)
+        burn_rate = self._calculate_burn_rate(slo_name, timedelta(hours=1))
+
+        # Determine status
+        status = self._determine_slo_status(current_sli, slo.target, error_budget_remaining)
+
+        return {
+            'slo_name': slo_name,
+            'status': status,
+            'current_sli': current_sli,
+            'target_sli': slo.target,
+            'error_budget_remaining': error_budget_remaining,
+            'error_budget_consumed': error_budget_consumed,
+            'burn_rate': burn_rate,
+            'total_events': total_events,
+            'good_events': total_good,
+            'bad_events': total_events - total_good
+        }
+
+    def _get_recent_slis(self, slo_name: str, time_window: timedelta) -> List[SLI]:
+        """Get SLIs within the specified time window"""
+        cutoff_time = datetime.utcnow() - time_window
+        return [
+            sli for sli in self.sli_history[slo_name]
+            if sli.timestamp >= cutoff_time
+        ]
+
+    def _calculate_burn_rate(self, slo_name: str, time_window: timedelta) -> float:
+        """Calculate error burn rate over specified time window"""
+        recent_slis = self._get_recent_slis(slo_name, time_window)
+
+        if not recent_slis:
+            return 0.0
+
+        total_bad = sum(sli.total_events - sli.good_events for sli in recent_slis)
+        window_hours = time_window.total_seconds() / 3600
+
+        return total_bad / window_hours if window_hours > 0 else 0.0
+
+    def _determine_slo_status(self, current_sli: float, target_sli: float,
+                            error_budget_remaining: float) -> str:
+        """Determine SLO status based on current performance"""
+        if current_sli >= target_sli:
+            return 'healthy'
+        elif error_budget_remaining > 0.5:  # More than 50% budget remaining
+            return 'at_risk'
+        elif error_budget_remaining > 0.1:  # More than 10% budget remaining
+            return 'critical'
+        else:
+            return 'exhausted'
+
+    def _cleanup_old_sli_data(self, slo_name: str):
+        """Remove old SLI data outside of time window"""
+        slo = self.slos[slo_name]
+        cutoff_time = datetime.utcnow() - slo.time_window - timedelta(hours=1)  # Keep 1 hour buffer
+
+        self.sli_history[slo_name] = [
+            sli for sli in self.sli_history[slo_name]
+            if sli.timestamp >= cutoff_time
+        ]
+
+# Usage example
+slo_monitor = SLOMonitor()
+
+# Register SLOs
+slo_monitor.register_slo(SLO(
+    name="api_availability",
+    target=0.999,  # 99.9% availability
+    time_window=timedelta(days=30)
+))
+
+slo_monitor.register_slo(SLO(
+    name="api_latency",
+    target=0.95,  # 95% of requests under threshold
+    time_window=timedelta(days=7)
+))
+
+# Record SLI measurements (would be called by monitoring system)
+def record_api_availability(success_count: int, total_count: int):
+    slo_monitor.record_sli("api_availability", success_count, total_count)
+
+def record_api_latency(fast_requests: int, total_requests: int):
+    slo_monitor.record_sli("api_latency", fast_requests, total_requests)
+```
+
+## Dashboard and Visualization
+
+### Dashboard Configuration
+```python
+# Example: Dashboard configuration and metrics aggregation
+from typing import Dict, List, Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+@dataclass
+class DashboardWidget:
+    id: str
+    title: str
+    widget_type: str  # 'metric', 'chart', 'table', 'alert_status'
+    data_source: str
+    query: str
+    refresh_interval: int  # seconds
+    visualization_config: Dict[str, Any]
+
+@dataclass
+class Dashboard:
+    id: str
+    title: str
+    description: str
+    widgets: List[DashboardWidget]
+    time_range: str  # e.g., '1h', '24h', '7d'
+    refresh_interval: int
+    tags: List[str]
+
+class DashboardManager:
+    def __init__(self):
+        self.dashboards: Dict[str, Dashboard] = {}
+        self.widget_data_cache: Dict[str, Any] = {}
+
+    def create_system_overview_dashboard(self) -> Dashboard:
+        """Create a comprehensive system overview dashboard"""
+        widgets = [
+            # System metrics
+            DashboardWidget(
+                id="cpu_usage",
+                title="CPU Usage",
+                widget_type="gauge",
+                data_source="prometheus",
+                query='avg(system_cpu_usage_percent)',
+                refresh_interval=30,
+                visualization_config={
+                    "min": 0,
+                    "max": 100,
+                    "thresholds": [{"value": 80, "color": "yellow"}, {"value": 90, "color": "red"}]
+                }
+            ),
+
+            DashboardWidget(
+                id="memory_usage",
+                title="Memory Usage",
+                widget_type="gauge",
+                data_source="prometheus",
+                query='avg(system_memory_usage_percent)',
+                refresh_interval=30,
+                visualization_config={
+                    "min": 0,
+                    "max": 100,
+                    "thresholds": [{"value": 85, "color": "yellow"}, {"value": 95, "color": "red"}]
+                }
+            ),
+
+            # Request metrics
+            DashboardWidget(
+                id="request_rate",
+                title="Request Rate",
+                widget_type="line_chart",
+                data_source="prometheus",
+                query='rate(http_requests_total[5m])',
+                refresh_interval=30,
+                visualization_config={
+                    "y_axis": {"title": "Requests/sec"},
+                    "legend": {"show": True}
+                }
+            ),
+
+            DashboardWidget(
+                id="response_time",
+                title="Response Time Percentiles",
+                widget_type="line_chart",
+                data_source="prometheus",
+                query='histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))',
+                refresh_interval=30,
+                visualization_config={
+                    "y_axis": {"title": "Seconds"},
+                    "multiple_series": [
+                        {"name": "95th percentile", "color": "blue"},
+                        {"name": "99th percentile", "color": "red"}
+                    ]
+                }
+            ),
+
+            # Error tracking
+            DashboardWidget(
+                id="error_rate",
+                title="Error Rate",
+                widget_type="single_stat",
+                data_source="prometheus",
+                query='rate(http_requests_total{status_code!~"2.."}[5m]) / rate(http_requests_total[5m]) * 100',
+                refresh_interval=30,
+                visualization_config={
+                    "unit": "%",
+                    "thresholds": [{"value": 1, "color": "yellow"}, {"value": 5, "color": "red"}]
+                }
+            ),
+
+            # SLO status
+            DashboardWidget(
+                id="slo_status",
+                title="SLO Status",
+                widget_type="table",
+                data_source="custom",
+                query="slo_status_all",
+                refresh_interval=60,
+                visualization_config={
+                    "columns": ["SLO", "Current", "Target", "Error Budget", "Status"],
+                    "status_column": "Status"
+                }
+            ),
+        ]
+
+        dashboard = Dashboard(
+            id="system_overview",
+            title="System Overview",
+            description="High-level system health and performance metrics",
+            widgets=widgets,
+            time_range="1h",
+            refresh_interval=30,
+            tags=["system", "overview", "health"]
+        )
+
+        self.dashboards[dashboard.id] = dashboard
+        return dashboard
+
+    def create_application_dashboard(self) -> Dashboard:
+        """Create application-specific monitoring dashboard"""
+        widgets = [
+            DashboardWidget(
+                id="active_users",
+                title="Active Users",
+                widget_type="single_stat",
+                data_source="prometheus",
+                query='sum(active_sessions_total)',
+                refresh_interval=60,
+                visualization_config={"color": "green"}
+            ),
+
+            DashboardWidget(
+                id="business_events",
+                title="Business Events",
+                widget_type="bar_chart",
+                data_source="prometheus",
+                query='rate(business_events_total[1h])',
+                refresh_interval=300,
+                visualization_config={
+                    "group_by": "event_type",
+                    "x_axis": {"title": "Event Type"},
+                    "y_axis": {"title": "Events/hour"}
+                }
+            ),
+
+            DashboardWidget(
+                id="database_performance",
+                title="Database Query Performance",
+                widget_type="heatmap",
+                data_source="prometheus",
+                query='histogram_quantile(0.95, rate(database_operation_duration_seconds_bucket[5m]))',
+                refresh_interval=60,
+                visualization_config={
+                    "x_axis": {"title": "Time"},
+                    "y_axis": {"title": "Duration (seconds)"},
+                    "color_scale": "YlOrRd"
+                }
+            )
+        ]
+
+        dashboard = Dashboard(
+            id="application_metrics",
+            title="Application Metrics",
+            description="Application-specific performance and business metrics",
+            widgets=widgets,
+            time_range="4h",
+            refresh_interval=60,
+            tags=["application", "business", "performance"]
+        )
+
+        self.dashboards[dashboard.id] = dashboard
+        return dashboard
+```
+
+## Testing Monitoring Systems
+
+### Monitoring Test Framework
+```python
+# Example: Testing framework for monitoring systems
+import pytest
+from unittest.mock import Mock, patch, MagicMock
+import time
+
+class TestMonitoringSystem:
+    def test_system_metrics_collection(self):
+        """Test system metrics collection accuracy"""
+        monitor = SystemMonitor()
+
+        with patch('psutil.cpu_percent', return_value=75.5):
+            with patch('psutil.virtual_memory') as mock_memory:
+                mock_memory.return_value.percent = 60.2
+
+                metrics = monitor.collect_metrics()
+
+                assert metrics.cpu_percent == 75.5
+                assert metrics.memory_percent == 60.2
+
+    def test_alert_rule_evaluation(self):
+        """Test alert rule condition evaluation"""
+        def high_cpu_condition(metrics):
+            return metrics.get('cpu_usage', 0) > 80
+
+        rule = AlertRule(
+            name="high_cpu",
+            condition=high_cpu_condition,
+            severity=AlertSeverity.WARNING,
+            channels=[AlertChannel.EMAIL]
+        )
+
+        # Test rule doesn't trigger below threshold
+        assert not rule.should_trigger({'cpu_usage': 75})
+
+        # Test rule triggers above threshold
+        assert rule.should_trigger({'cpu_usage': 85})
+
+    def test_alert_cooldown_period(self):
+        """Test alert rule cooldown functionality"""
+        rule = AlertRule(
+            name="test_alert",
+            condition=lambda m: True,  # Always triggers
+            severity=AlertSeverity.WARNING,
+            channels=[AlertChannel.EMAIL],
+            cooldown_minutes=5
+        )
+
+        # First trigger should work
+        assert rule.should_trigger({})
+        rule.last_triggered = datetime.utcnow()
+
+        # Second trigger within cooldown should not work
+        assert not rule.should_trigger({})
+
+        # Trigger after cooldown should work
+        rule.last_triggered = datetime.utcnow() - timedelta(minutes=6)
+        assert rule.should_trigger({})
+
+    def test_slo_calculation(self):
+        """Test SLO calculation accuracy"""
+        monitor = SLOMonitor()
+
+        slo = SLO(
+            name="test_slo",
+            target=0.99,  # 99% target
+            time_window=timedelta(hours=1)
+        )
+
+        monitor.register_slo(slo)
+
+        # Record some SLI data
+        monitor.record_sli("test_slo", 990, 1000)  # 99% success rate
+
+        status = monitor.calculate_slo_status("test_slo")
+
+        assert status['current_sli'] == 0.99
+        assert status['status'] == 'healthy'
+        assert status['error_budget_remaining'] == 1.0  # No budget consumed
+
+    def test_slo_error_budget_consumption(self):
+        """Test SLO error budget calculation"""
+        monitor = SLOMonitor()
+
+        slo = SLO(
+            name="test_slo",
+            target=0.99,
+            time_window=timedelta(hours=1)
+        )
+
+        monitor.register_slo(slo)
+
+        # Record SLI data that violates SLO
+        monitor.record_sli("test_slo", 950, 1000)  # 95% success rate
+
+        status = monitor.calculate_slo_status("test_slo")
+
+        assert status['current_sli'] == 0.95
+        assert status['status'] in ['at_risk', 'critical']
+        assert status['error_budget_remaining'] < 1.0
+
+    @patch('smtplib.SMTP')
+    def test_email_notification(self, mock_smtp):
+        """Test email notification sending"""
+        manager = AlertManager()
+
+        alert = Alert(
+            name="test_alert",
+            severity=AlertSeverity.CRITICAL,
+            message="Test alert message",
+            source="test_system"
+        )
+
+        alert.metadata['channels'] = ['email']
+
+        manager._send_email_notification(alert)
+
+        # Verify SMTP was called
+        mock_smtp.assert_called_once()
+
+    def test_prometheus_metrics_recording(self):
+        """Test Prometheus metrics are recorded correctly"""
+        from prometheus_client import REGISTRY
+
+        # Clear registry for clean test
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            if hasattr(collector, '_name'):
+                REGISTRY.unregister(collector)
+
+        # Test metric recording
+        REQUEST_COUNT.labels(
+            method='GET',
+            endpoint='/test',
+            status_code='200',
+            user_type='free'
+        ).inc()
+
+        # Verify metric was recorded
+        metric_families = REGISTRY.collect()
+        request_metrics = [
+            family for family in metric_families
+            if family.name == 'http_requests_total'
+        ]
+
+        assert len(request_metrics) == 1
+        assert len(request_metrics[0].samples) >= 1
+```
+
+## Best Practices and Anti-Patterns
+
+### Best Practices
+✅ Monitor the four golden signals: latency, traffic, errors, saturation
+✅ Implement both technical and business metrics
+✅ Use structured logging with correlation IDs
+✅ Create actionable alerts that require human intervention
+✅ Implement proper alert escalation and on-call rotation
+✅ Monitor SLOs and error budgets
+✅ Use appropriate metric types (counter, gauge, histogram)
+✅ Implement health checks at multiple levels
+
+### Anti-Patterns to Avoid
+❌ Creating too many noisy alerts that get ignored
+❌ Monitoring everything without prioritization
+❌ Using logs for metrics or metrics for debugging
+❌ Not testing monitoring and alerting systems
+❌ Ignoring alert fatigue and burnout
+❌ Over-engineering monitoring systems
+❌ Not documenting alert runbooks and procedures
+❌ Monitoring symptoms without understanding root causes
+
+## Tool Integration
+
+### Monitoring Stack Components
+- **Metrics Collection**: Prometheus, InfluxDB, CloudWatch
+- **Visualization**: Grafana, Kibana, DataDog
+- **Alerting**: AlertManager, PagerDuty, OpsGenie
+- **APM**: New Relic, DataDog APM, Elastic APM
+- **Log Aggregation**: ELK Stack, Splunk, Fluentd
+- **Synthetic Monitoring**: Pingdom, UptimeRobot, Synthetic tests
+
+### Cloud Platform Integration
+- **AWS**: CloudWatch, X-Ray, Systems Manager, SNS
+- **Azure**: Azure Monitor, Application Insights, Log Analytics
+- **GCP**: Cloud Monitoring, Cloud Logging, Error Reporting
+- **Kubernetes**: Prometheus Operator, Grafana, Jaeger

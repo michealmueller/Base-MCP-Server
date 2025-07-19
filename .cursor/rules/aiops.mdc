@@ -1,0 +1,556 @@
+---
+description: AIOps Development Rules and Best Practices
+globs:
+alwaysApply: false
+---
+# AIOps Development Rules and Best Practices
+
+This file contains rules for AIOps-related code generation. It guides the AI in generating code that adheres to best practices in AI for IT Operations, intelligent automation, and ML-driven infrastructure management.
+
+## Core AIOps Principles
+
+### Intelligent Automation
+- Implement self-healing systems with automated remediation
+- Use predictive analytics for proactive issue prevention
+- Apply anomaly detection for early problem identification
+- Automate routine operational tasks using ML models
+- Implement intelligent alerting to reduce noise and false positives
+- Design adaptive systems that learn from operational patterns
+
+### Data-Driven Operations
+- Collect and analyze multi-dimensional operational data
+- Implement real-time data processing pipelines
+- Use time-series analysis for trend identification
+- Apply correlation analysis across different data sources
+- Maintain data quality and consistency across systems
+- Implement data governance for operational metrics
+
+## Infrastructure Intelligence
+
+### Predictive Analytics
+```python
+# Example: Predictive capacity planning
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+
+class CapacityPredictor:
+    def __init__(self):
+        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.scaler = StandardScaler()
+
+    def train(self, historical_data: pd.DataFrame):
+        """Train capacity prediction model on historical usage data"""
+        features = ['cpu_usage', 'memory_usage', 'disk_io', 'network_io', 'hour', 'day_of_week']
+        X = historical_data[features]
+        y = historical_data['future_cpu_usage']
+
+        X_scaled = self.scaler.fit_transform(X)
+        self.model.fit(X_scaled, y)
+
+    def predict_capacity_needs(self, current_metrics: dict) -> dict:
+        """Predict future resource needs based on current metrics"""
+        features_df = pd.DataFrame([current_metrics])
+        features_scaled = self.scaler.transform(features_df)
+        prediction = self.model.predict(features_scaled)[0]
+
+        return {
+            'predicted_cpu_usage': prediction,
+            'recommendation': self._generate_recommendation(prediction),
+            'confidence': self._calculate_confidence(features_scaled)
+        }
+```
+
+### Anomaly Detection
+```python
+# Example: Multi-variate anomaly detection for infrastructure
+from sklearn.ensemble import IsolationForest
+import numpy as np
+
+class InfrastructureAnomalyDetector:
+    def __init__(self, contamination=0.1):
+        self.model = IsolationForest(contamination=contamination, random_state=42)
+        self.threshold = -0.5
+
+    def fit(self, normal_data: np.ndarray):
+        """Fit anomaly detector on normal operational data"""
+        self.model.fit(normal_data)
+
+    def detect_anomalies(self, current_data: np.ndarray) -> dict:
+        """Detect anomalies in current infrastructure metrics"""
+        anomaly_scores = self.model.decision_function(current_data)
+        predictions = self.model.predict(current_data)
+
+        anomalies = []
+        for i, (score, pred) in enumerate(zip(anomaly_scores, predictions)):
+            if pred == -1:  # Anomaly detected
+                anomalies.append({
+                    'index': i,
+                    'severity': self._calculate_severity(score),
+                    'metrics': current_data[i].tolist(),
+                    'timestamp': pd.Timestamp.now()
+                })
+
+        return {
+            'anomalies_detected': len(anomalies),
+            'anomalies': anomalies,
+            'overall_health_score': np.mean(anomaly_scores)
+        }
+```
+
+## Intelligent Monitoring and Alerting
+
+### Smart Alert Management
+```python
+# Example: Intelligent alert correlation and deduplication
+from typing import List, Dict
+import hashlib
+from datetime import datetime, timedelta
+
+class IntelligentAlertManager:
+    def __init__(self):
+        self.alert_patterns = {}
+        self.correlation_rules = []
+        self.suppression_rules = {}
+
+    def process_alert(self, alert: Dict) -> Dict:
+        """Process incoming alert with intelligent correlation"""
+        alert_signature = self._generate_alert_signature(alert)
+
+        # Check for similar recent alerts
+        similar_alerts = self._find_similar_alerts(alert_signature)
+
+        if similar_alerts:
+            # Correlate with existing alerts
+            correlated_alert = self._correlate_alerts(alert, similar_alerts)
+            action = 'correlate'
+        else:
+            # New unique alert
+            correlated_alert = alert
+            action = 'new'
+
+        # Apply intelligent suppression
+        if self._should_suppress_alert(correlated_alert):
+            action = 'suppress'
+
+        return {
+            'original_alert': alert,
+            'processed_alert': correlated_alert,
+            'action': action,
+            'confidence': self._calculate_correlation_confidence(alert)
+        }
+
+    def _generate_alert_signature(self, alert: Dict) -> str:
+        """Generate unique signature for alert clustering"""
+        key_fields = ['service', 'metric_name', 'error_type']
+        signature_data = ''.join([str(alert.get(field, '')) for field in key_fields])
+        return hashlib.md5(signature_data.encode()).hexdigest()
+```
+
+### Automated Root Cause Analysis
+```python
+# Example: ML-based root cause analysis
+from sklearn.ensemble import RandomForestClassifier
+import networkx as nx
+
+class RootCauseAnalyzer:
+    def __init__(self):
+        self.dependency_graph = nx.DiGraph()
+        self.causality_model = RandomForestClassifier(n_estimators=100)
+        self.symptom_patterns = {}
+
+    def build_dependency_graph(self, services_config: Dict):
+        """Build service dependency graph"""
+        for service, dependencies in services_config.items():
+            self.dependency_graph.add_node(service)
+            for dep in dependencies:
+                self.dependency_graph.add_edge(service, dep)
+
+    def analyze_incident(self, symptoms: List[Dict]) -> Dict:
+        """Analyze incident symptoms to identify root cause"""
+        # Extract features from symptoms
+        features = self._extract_symptom_features(symptoms)
+
+        # Predict probable root causes
+        if hasattr(self.causality_model, 'predict_proba'):
+            cause_probabilities = self.causality_model.predict_proba([features])[0]
+            causes = self.causality_model.classes_
+
+            # Rank causes by probability
+            cause_ranking = sorted(
+                zip(causes, cause_probabilities),
+                key=lambda x: x[1],
+                reverse=True
+            )
+        else:
+            cause_ranking = [('unknown', 0.0)]
+
+        # Analyze dependency impact
+        impact_analysis = self._analyze_dependency_impact(symptoms)
+
+        return {
+            'probable_root_causes': cause_ranking[:5],
+            'dependency_impact': impact_analysis,
+            'recommended_actions': self._generate_remediation_actions(cause_ranking[0][0]),
+            'confidence_score': cause_ranking[0][1] if cause_ranking else 0.0
+        }
+```
+
+## Automated Remediation
+
+### Self-Healing Systems
+```python
+# Example: Automated remediation engine
+from abc import ABC, abstractmethod
+from enum import Enum
+
+class RemediationAction(ABC):
+    @abstractmethod
+    def execute(self, context: Dict) -> Dict:
+        pass
+
+    @abstractmethod
+    def rollback(self, context: Dict) -> Dict:
+        pass
+
+class RestartServiceAction(RemediationAction):
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+
+    def execute(self, context: Dict) -> Dict:
+        """Execute service restart remediation"""
+        try:
+            # Use appropriate orchestration tool (k8s, systemd, etc.)
+            result = self._restart_service(self.service_name)
+            return {
+                'status': 'success',
+                'action': 'restart_service',
+                'service': self.service_name,
+                'result': result
+            }
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'action': 'restart_service',
+                'service': self.service_name,
+                'error': str(e)
+            }
+
+    def rollback(self, context: Dict) -> Dict:
+        """Rollback remediation if needed"""
+        # Implement rollback logic
+        pass
+
+class AutoRemediationEngine:
+    def __init__(self):
+        self.remediation_rules = {}
+        self.action_history = []
+        self.safety_limits = {
+            'max_actions_per_hour': 10,
+            'max_restarts_per_service': 3
+        }
+
+    def register_remediation_rule(self, condition: str, action: RemediationAction):
+        """Register automated remediation rule"""
+        self.remediation_rules[condition] = action
+
+    def evaluate_and_remediate(self, alert: Dict) -> Dict:
+        """Evaluate alert and execute appropriate remediation"""
+        # Check safety limits
+        if not self._check_safety_limits():
+            return {'status': 'skipped', 'reason': 'safety_limits_exceeded'}
+
+        # Find matching remediation rule
+        matching_rule = self._find_matching_rule(alert)
+
+        if matching_rule:
+            # Execute remediation
+            result = matching_rule.execute(alert)
+            self._record_action(result)
+            return result
+        else:
+            return {'status': 'no_action', 'reason': 'no_matching_rule'}
+```
+
+## Performance Optimization
+
+### Resource Optimization
+```python
+# Example: ML-driven resource optimization
+import numpy as np
+from scipy.optimize import minimize
+
+class ResourceOptimizer:
+    def __init__(self):
+        self.cost_model = None
+        self.performance_model = None
+        self.constraints = {}
+
+    def optimize_allocation(self, workload_forecast: Dict,
+                          available_resources: Dict) -> Dict:
+        """Optimize resource allocation based on predicted workload"""
+
+        def objective_function(allocation):
+            # Minimize cost while maintaining performance
+            cost = self._calculate_cost(allocation, available_resources)
+            performance_penalty = self._calculate_performance_penalty(
+                allocation, workload_forecast
+            )
+            return cost + performance_penalty
+
+        def constraint_function(allocation):
+            # Ensure resource constraints are met
+            return self._validate_constraints(allocation, available_resources)
+
+        # Initial allocation
+        initial_allocation = self._get_current_allocation()
+
+        # Optimization
+        result = minimize(
+            objective_function,
+            initial_allocation,
+            method='SLSQP',
+            constraints={'type': 'ineq', 'fun': constraint_function}
+        )
+
+        return {
+            'optimized_allocation': result.x,
+            'cost_savings': self._calculate_savings(initial_allocation, result.x),
+            'performance_impact': self._assess_performance_impact(result.x),
+            'implementation_plan': self._generate_implementation_plan(result.x)
+        }
+```
+
+## Continuous Learning and Adaptation
+
+### Model Retraining Pipeline
+```python
+# Example: Automated model retraining for AIOps
+from datetime import datetime, timedelta
+import pickle
+
+class AIOpsModelManager:
+    def __init__(self):
+        self.models = {}
+        self.model_metrics = {}
+        self.retraining_schedule = {}
+
+    def register_model(self, model_name: str, model, retraining_frequency: timedelta):
+        """Register AIOps model for management"""
+        self.models[model_name] = {
+            'model': model,
+            'last_trained': datetime.now(),
+            'version': '1.0.0',
+            'performance_metrics': {}
+        }
+        self.retraining_schedule[model_name] = retraining_frequency
+
+    def evaluate_model_performance(self, model_name: str,
+                                 test_data: Dict) -> Dict:
+        """Evaluate current model performance"""
+        model_info = self.models[model_name]
+        model = model_info['model']
+
+        # Evaluate model on recent data
+        predictions = model.predict(test_data['features'])
+        actual = test_data['labels']
+
+        metrics = {
+            'accuracy': self._calculate_accuracy(predictions, actual),
+            'precision': self._calculate_precision(predictions, actual),
+            'recall': self._calculate_recall(predictions, actual),
+            'f1_score': self._calculate_f1(predictions, actual),
+            'evaluation_date': datetime.now()
+        }
+
+        self.model_metrics[model_name] = metrics
+        return metrics
+
+    def should_retrain_model(self, model_name: str) -> bool:
+        """Determine if model needs retraining"""
+        model_info = self.models[model_name]
+        last_trained = model_info['last_trained']
+        frequency = self.retraining_schedule[model_name]
+
+        # Time-based retraining
+        if datetime.now() - last_trained > frequency:
+            return True
+
+        # Performance-based retraining
+        if model_name in self.model_metrics:
+            current_performance = self.model_metrics[model_name]['accuracy']
+            baseline_performance = model_info['performance_metrics'].get('baseline_accuracy', 0.8)
+
+            if current_performance < baseline_performance * 0.9:  # 10% degradation
+                return True
+
+        return False
+```
+
+## Security and Compliance
+
+### AIOps Security Framework
+```python
+# Example: Security-aware AIOps implementation
+from cryptography.fernet import Fernet
+import logging
+
+class SecureAIOpsFramework:
+    def __init__(self, encryption_key: bytes):
+        self.cipher = Fernet(encryption_key)
+        self.audit_logger = logging.getLogger('aiops_audit')
+        self.access_controls = {}
+
+    def secure_data_processing(self, sensitive_data: Dict) -> Dict:
+        """Process sensitive operational data securely"""
+        # Encrypt sensitive fields
+        encrypted_data = {}
+        for key, value in sensitive_data.items():
+            if self._is_sensitive_field(key):
+                encrypted_data[key] = self.cipher.encrypt(str(value).encode())
+            else:
+                encrypted_data[key] = value
+
+        # Log access
+        self.audit_logger.info(f"Processed sensitive data: {list(sensitive_data.keys())}")
+
+        return encrypted_data
+
+    def validate_ml_model_security(self, model_path: str) -> Dict:
+        """Validate ML model for security vulnerabilities"""
+        security_checks = {
+            'model_integrity': self._verify_model_integrity(model_path),
+            'adversarial_robustness': self._test_adversarial_robustness(model_path),
+            'privacy_compliance': self._check_privacy_compliance(model_path),
+            'access_controls': self._validate_access_controls(model_path)
+        }
+
+        return {
+            'security_score': sum(security_checks.values()) / len(security_checks),
+            'checks': security_checks,
+            'recommendations': self._generate_security_recommendations(security_checks)
+        }
+```
+
+## Testing and Validation
+
+### AIOps Testing Framework
+```python
+# Example: Comprehensive testing for AIOps systems
+import pytest
+from unittest.mock import Mock, patch
+
+class TestAIOpsComponents:
+    def test_anomaly_detection_accuracy(self):
+        """Test anomaly detection model accuracy"""
+        detector = InfrastructureAnomalyDetector()
+
+        # Generate synthetic normal and anomalous data
+        normal_data = np.random.normal(0, 1, (1000, 5))
+        anomalous_data = np.random.normal(5, 2, (100, 5))
+
+        detector.fit(normal_data)
+
+        # Test detection on known anomalies
+        results = detector.detect_anomalies(anomalous_data)
+
+        assert results['anomalies_detected'] > 50  # At least 50% detection rate
+        assert results['overall_health_score'] < -0.1  # Low health score for anomalies
+
+    def test_automated_remediation_safety(self):
+        """Test safety mechanisms in automated remediation"""
+        engine = AutoRemediationEngine()
+
+        # Mock multiple rapid alerts
+        for _ in range(15):  # Exceed safety limit
+            alert = {'service': 'test-service', 'severity': 'high'}
+            result = engine.evaluate_and_remediate(alert)
+
+        # Should trigger safety limits
+        assert result['status'] == 'skipped'
+        assert 'safety_limits' in result['reason']
+
+    @patch('kubernetes.client.AppsV1Api')
+    def test_kubernetes_integration(self, mock_k8s_api):
+        """Test Kubernetes integration for remediation"""
+        mock_api = Mock()
+        mock_k8s_api.return_value = mock_api
+
+        action = RestartServiceAction('test-deployment')
+        result = action.execute({'namespace': 'default'})
+
+        # Verify Kubernetes API was called
+        mock_api.patch_namespaced_deployment.assert_called_once()
+```
+
+## Monitoring AIOps Systems
+
+### Self-Monitoring
+```python
+# Example: Monitor the AIOps system itself
+class AIOpsSystemMonitor:
+    def __init__(self):
+        self.metrics_collector = {}
+        self.health_checks = []
+
+    def monitor_ml_model_drift(self, model_name: str,
+                              current_data: np.ndarray,
+                              reference_data: np.ndarray) -> Dict:
+        """Monitor for ML model drift"""
+        from scipy.stats import ks_2samp
+
+        drift_results = {}
+
+        for feature_idx in range(current_data.shape[1]):
+            current_feature = current_data[:, feature_idx]
+            reference_feature = reference_data[:, feature_idx]
+
+            # Kolmogorov-Smirnov test for distribution drift
+            ks_statistic, p_value = ks_2samp(current_feature, reference_feature)
+
+            drift_results[f'feature_{feature_idx}'] = {
+                'ks_statistic': ks_statistic,
+                'p_value': p_value,
+                'drift_detected': p_value < 0.05
+            }
+
+        return {
+            'model': model_name,
+            'overall_drift_score': np.mean([r['ks_statistic'] for r in drift_results.values()]),
+            'features_with_drift': sum([r['drift_detected'] for r in drift_results.values()]),
+            'detailed_results': drift_results,
+            'recommendation': self._generate_drift_recommendation(drift_results)
+        }
+```
+
+## Best Practices and Anti-Patterns
+
+### Best Practices
+✅ Implement gradual rollout of AIOps automation
+✅ Maintain human oversight and intervention capabilities
+✅ Use A/B testing for new AIOps features
+✅ Implement comprehensive logging and audit trails
+✅ Regular model retraining and validation
+✅ Design fail-safe mechanisms for automated actions
+
+### Anti-Patterns to Avoid
+❌ Fully automated systems without human oversight
+❌ Ignoring model drift and performance degradation
+❌ Over-relying on historical data without adaptation
+❌ Implementing AIOps without proper monitoring
+❌ Neglecting security and privacy considerations
+❌ Not testing remediation actions in non-production environments
+
+## Integration Patterns
+
+### Cloud Platform Integration
+- AWS: CloudWatch, X-Ray, Systems Manager
+- Azure: Application Insights, Log Analytics, Automation
+- GCP: Operations Suite, Cloud Functions, Pub/Sub
+- Kubernetes: Prometheus, Grafana, Jaeger, Istio
+
+### Tool Ecosystem
+- **Monitoring**: Prometheus, Grafana, Datadog, New Relic
+- **Log Management**: ELK Stack, Splunk, Fluentd
+- **Orchestration**: Kubernetes, Docker Swarm, Nomad
+- **CI/CD**: Jenkins, GitLab CI, Azure DevOps, GitHub Actions

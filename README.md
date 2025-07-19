@@ -1,4 +1,4 @@
-# Daggerheart MCP Server
+#MCP Server
 
 A production-grade Model Context Protocol (MCP) server implementation for the Daggerheart AI Agent system.
 
